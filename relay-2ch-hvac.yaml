@@ -1,9 +1,9 @@
 substitutions:
   name: relay-2ch-hvac
 
-  # Wie lange nach Zündung AUS (D+ fällt ab) gewartet wird, bevor der
-  # Batteriebetrieb freigegeben wird. Puffer für den Nachlauf des
-  # Original-Gebläsecontrollers - bitte an dein Fahrzeug anpassen/testen.
+  # How long to wait after ignition OFF (D+ drops) before battery mode is
+  # re-armed. Buffer for the OEM blower controller's after-run - tune this
+  # for your vehicle.
   ignition_off_delay: 5min
 
 packages:
@@ -18,19 +18,19 @@ esp32:
   variant: esp32
 
 globals:
-  # false = Kanal R aktiv (RPWM/R_EN), true = Kanal L aktiv (LPWM/L_EN).
-  # Einmalig per Test-Buttons (siehe unten) die richtige Drehrichtung
-  # ermitteln und hier den initial_value umstellen. Sobald das feststeht,
-  # kann der ungenutzte Kanal auch hardwareseitig fest verdrahtet und aus
-  # der Config entfernt werden.
+  # false = channel R active (RPWM/R_EN), true = channel L active
+  # (LPWM/L_EN). Use the test buttons below once to determine the correct
+  # rotation direction, then flip initial_value accordingly. Once that's
+  # known, the unused channel can also be hardwired in hardware and
+  # removed from this config.
   - id: ibt2_use_channel_l
     type: bool
     restore_value: false
     initial_value: "false"
 
-  # Batteriebetrieb ist nur erlaubt, wenn die Zündung/D+ aus ist UND der
-  # Nachlauf-Timer abgelaufen ist. Siehe binary_sensor.ignition_active und
-  # script.ignition_off_delay weiter unten.
+  # Battery mode is only allowed while ignition/D+ is off AND the after-run
+  # timer has elapsed. See binary_sensor.ignition_active and
+  # script.ignition_off_delay below.
   - id: battery_mode_allowed
     type: bool
     restore_value: false
@@ -41,9 +41,9 @@ output:
     id: output_led
     pin: 5
 
-  # RPWM/LPWM des IBT-2: Drehzahlsignal fürs Gebläse, je nach aktivem Kanal
-  # (siehe ibt2_use_channel_l). 20kHz = außerhalb des hörbaren Bereichs.
-  # Werden ausschließlich über die Scripts unten gesetzt, nie direkt.
+  # IBT-2 RPWM/LPWM: blower speed signal, depending on the active channel
+  # (see ibt2_use_channel_l). 20kHz = above the audible range. Only ever
+  # set via the scripts below, never directly.
   - platform: ledc
     id: pwm_rpwm
     pin: 4
@@ -60,13 +60,14 @@ light:
     output: output_led
 
 binary_sensor:
-  # Zündungs-/Laufsignal des Fahrzeugs (D+ vom LiMa, oder Klemme 15 - was
-  # verfügbar ist), galvanisch getrennt über einen PC817C-Optokoppler auf
-  # den 3.3V-Logikpegel des ESP32 - siehe README, "D+ Sense-Eingang".
-  # `inverted: true`, weil der Optokoppler-Ausgang aktiv-low ist (Kollektor
-  # wird bei anliegendem D+ gegen GND gezogen). GPIO34 hat als Input-only-Pin
-  # KEINEN internen Pull-up - der externe 10kΩ-Pull-up am Kollektor (siehe
-  # README) ist zwingend, sonst liest der Pin undefiniert.
+  # Vehicle ignition/running signal (D+ from the alternator, or terminal
+  # 15 - whichever is available), galvanically isolated via a PC817C
+  # optocoupler down to the ESP32's 3.3V logic level - see README,
+  # "D+ sense input". `inverted: true` because the optocoupler output is
+  # active-low (collector gets pulled toward GND while D+ is present).
+  # GPIO34 is an input-only pin with NO internal pull-up - the external
+  # 10kΩ pull-up on the collector (see README) is mandatory, otherwise the
+  # pin floats.
   - platform: gpio
     name: "Ignition / D+ Active"
     id: ignition_active
@@ -79,8 +80,8 @@ binary_sensor:
       - delayed_off: 200ms
     publish_initial_state: true
     on_press:
-      # Zündung geht an (oder Motor läuft an) -> SOFORT zurück auf
-      # Original-Controller, kein Warten, keine Ausnahme.
+      # Ignition comes on (or the engine starts) -> IMMEDIATELY back to the
+      # OEM controller, no waiting, no exception.
       - script.stop: ignition_off_delay
       - globals.set:
           id: battery_mode_allowed
@@ -90,18 +91,18 @@ binary_sensor:
           option: "Off"
       - script.execute: ibt2_disengage
     on_release:
-      # Zündung geht aus -> Nachlauf-Timer starten, danach erst wird
-      # Batteriebetrieb wieder freigegeben (Original-Gebläse könnte noch
-      # kurz nachlaufen).
+      # Ignition goes off -> start the after-run timer; only once it
+      # elapses is battery mode re-armed (the OEM blower may still run on
+      # briefly).
       - script.execute: ignition_off_delay
 
 switch:
-  # Beide Relais liegen an den Motorleitungen des Gebläses (siehe README/Wiring).
-  # Sie werden NIE einzeln angesteuert, sondern immer gemeinsam über die
-  # "Fan Power Source"-Logik weiter unten geschaltet - deshalb `internal: true`,
-  # damit in HA/Web-UI nur ein einziger, konsistenter Schalter auftaucht.
-  # restore_mode ALWAYS_OFF = nach Boot/Stromausfall immer zurück auf den
-  # unbestromten Ruhezustand der Relais = Original-Controller (Fail-Safe).
+  # Both relays sit on the blower's motor leads (see README/wiring). They
+  # are NEVER actuated individually, always together via the "fan power
+  # source" logic below - hence `internal: true`, so HA/the web UI only
+  # ever shows a single, consistent control.
+  # restore_mode ALWAYS_OFF = after boot/power loss, always fall back to
+  # the relays' de-energized rest state = OEM controller (fail-safe).
   - platform: gpio
     id: relay_1
     pin: 12
@@ -113,11 +114,10 @@ switch:
     internal: true
     restore_mode: ALWAYS_OFF
 
-  # Gemeinsamer interner Schalter für die Stromquelle des Gebläses.
-  # OFF (Default/Fail-Safe) = Original-Sprinter-Controller
-  # ON                      = Aufbaubatterie über IBT-2
-  # Wird ausschließlich von den Scripts unten gesteuert - kein eigenes
-  # UI-Element.
+  # Shared internal switch for the blower's power source.
+  # OFF (default/fail-safe) = OEM Sprinter controller
+  # ON                      = leisure battery via the IBT-2
+  # Only ever driven by the scripts below - no UI element of its own.
   - platform: template
     id: fan_source_battery
     internal: true
@@ -131,11 +131,11 @@ switch:
       - switch.turn_off: relay_1
       - switch.turn_off: relay_2
 
-  # R_EN/L_EN des IBT-2: zusätzlicher Software-Interlock je Kanal. Die
-  # H-Brücke wird immer erst scharf geschaltet, NACHDEM die Relais auf
-  # Batteriebetrieb umgelegt haben, und wird VOR dem Zurückschalten auf den
-  # Original-Controller wieder deaktiviert (siehe script.ibt2_engage /
-  # script.ibt2_disengage). Beide internal, kein eigenes UI-Element.
+  # IBT-2 R_EN/L_EN: extra software interlock per channel. The H-bridge is
+  # always armed only AFTER the relays have switched to battery mode, and
+  # disarmed BEFORE switching back to the OEM controller (see
+  # script.ibt2_engage / script.ibt2_disengage). Both internal, no UI
+  # element of their own.
   - platform: gpio
     id: ibt2_r_en
     pin: 16
@@ -148,11 +148,12 @@ switch:
     restore_mode: ALWAYS_OFF
 
 script:
-  # Schaltet auf Batteriebetrieb um und fährt die übergebene Stufe (1-3).
-  # Reihenfolge ist sicherheitsrelevant:
-  #   PWM auf 0% -> Relais auf Batterie -> passendes *_EN scharf -> Stufe setzen
-  # So liegt PWM nie an, während die Relais noch umschalten, und *_EN ist
-  # nie aktiv, während der Original-Controller noch am Motor hängt.
+  # Switches to battery mode and drives the given level (1-3).
+  # Order matters for safety:
+  #   PWM to 0% -> relays to battery -> matching *_EN armed -> level set
+  # This keeps PWM inactive while the relays are still switching, and
+  # *_EN is never armed while the OEM controller might still be on the
+  # motor.
   - id: ibt2_engage
     parameters:
       level: int
@@ -174,8 +175,8 @@ script:
                 id: pwm_rpwm
                 level: !lambda "return level / 3.0f;"
 
-  # Fährt PWM auf 0%, deaktiviert beide *_EN, schaltet die Relais zurück auf
-  # den Original-Controller. Genau umgekehrte Reihenfolge zu ibt2_engage.
+  # Drives PWM to 0%, disables both *_EN, switches the relays back to the
+  # OEM controller. Exact reverse order of ibt2_engage.
   - id: ibt2_disengage
     then:
       - output.set_level: { id: pwm_rpwm, level: 0% }
@@ -184,9 +185,9 @@ script:
       - switch.turn_off: ibt2_l_en
       - switch.turn_off: fan_source_battery
 
-  # Nachlauf-Timer nach Zündung AUS. mode: restart -> jeder erneute
-  # on_release der Zündung setzt den Timer zurück; script.stop (bei
-  # Zündung AN) bricht ihn sofort ab.
+  # After-run timer following ignition OFF. mode: restart -> every
+  # ignition on_release resets the timer; script.stop (on ignition ON)
+  # cancels it immediately.
   - id: ignition_off_delay
     mode: restart
     then:
@@ -194,23 +195,23 @@ script:
       - globals.set:
           id: battery_mode_allowed
           value: "true"
-      - logger.log: "Nachlauf-Timer abgelaufen - Batteriebetrieb freigegeben"
+      - logger.log: "After-run timer elapsed - battery mode re-armed"
 
 select:
-  # Einziges Bedienelement in HA/Web-UI für das ganze System.
-  # "Off" (Default/Fail-Safe) = Original-Sprinter-Controller aktiv,
-  #        Fahrzeugschalter funktioniert normal weiter, IBT-2 komplett vom
-  #        Motor getrennt und deaktiviert.
-  # "Low"/"Medium"/"High"     = Gebläse läuft über Aufbaubatterie/IBT-2.
+  # The single user-facing control for the whole system.
+  # "Off" (default/fail-safe) = OEM Sprinter controller active, the
+  #        vehicle's own switch works normally, IBT-2 fully disconnected
+  #        from the motor and disabled.
+  # "Low"/"Medium"/"High"     = blower runs off the leisure battery/IBT-2.
   #
-  # Anmerkung: bewusst als `select` statt als `fan:`-Domain umgesetzt - die
-  # aktuelle ESPHome-Template-Fan-Komponente arbeitet trigger-/
-  # publish-state-basiert (on_turn_on/on_speed_set feuern NACHDEM der
-  # Zustand schon optimistisch gesetzt wurde) und hat bekannte Reihenfolge-
-  # Probleme zwischen turn_on und set_speed (esphome/esphome#10844). Für
-  # eine sicherheitsrelevante Umschaltung wollen wir die exakte Sequenz
-  # selbst in der Hand haben - das leistet `select` mit `set_action`
-  # zuverlässig und schon lange stabil.
+  # Note: implemented as `select` rather than the `fan:` domain on purpose
+  # - ESPHome's current template fan component is trigger-/publish-state-
+  # based (on_turn_on/on_speed_set fire AFTER the state was already
+  # published optimistically) and has known ordering issues between
+  # turn_on and set_speed (esphome/esphome#10844). For a safety-relevant
+  # switch-over we want to own the exact sequence ourselves - `select`
+  # with `set_action` delivers that reliably and has been stable for
+  # years.
   - platform: template
     name: "HVAC Fan (Battery)"
     id: hvac_fan_select
@@ -226,7 +227,7 @@ select:
           if (x == "Off") {
             id(ibt2_disengage).execute();
           } else if (!id(battery_mode_allowed)) {
-            ESP_LOGW("hvac", "Batteriebetrieb nicht freigegeben (Zuendung an oder Nachlauf-Timer laeuft)");
+            ESP_LOGW("hvac", "Battery mode not armed (ignition on or after-run timer still running)");
             id(hvac_fan_select).publish_state("Off");
           } else if (x == "Low") {
             id(ibt2_engage).execute(1);
@@ -237,12 +238,12 @@ select:
           }
 
 button:
-  # Kommissionierungs-Hilfe: kurzer Testpuls je IBT-2-Kanal bei niedriger
-  # Drehzahl, um herauszufinden, welcher Kanal (R oder L) das Gebläse in die
-  # richtige (Werks-)Richtung dreht. Danach ibt2_use_channel_l oben setzen
-  # und diese Buttons bei Bedarf wieder entfernen.
+  # Commissioning helper: a short low-speed test pulse per IBT-2 channel,
+  # to find out which channel (R or L) spins the blower in the correct
+  # (factory) direction. Set ibt2_use_channel_l above afterwards and remove
+  # these buttons if you no longer need them.
   - platform: template
-    name: "IBT-2 Test: Kanal R (3s, 25%)"
+    name: "IBT-2 Test: Channel R (3s, 25%)"
     entity_category: config
     on_press:
       - if:
@@ -255,9 +256,9 @@ button:
             - delay: 3s
             - script.execute: ibt2_disengage
           else:
-            - logger.log: "Test gesperrt: Zuendung an oder Nachlauf-Timer laeuft"
+            - logger.log: "Test blocked: ignition on or after-run timer still running"
   - platform: template
-    name: "IBT-2 Test: Kanal L (3s, 25%)"
+    name: "IBT-2 Test: Channel L (3s, 25%)"
     entity_category: config
     on_press:
       - if:
@@ -270,4 +271,4 @@ button:
             - delay: 3s
             - script.execute: ibt2_disengage
           else:
-            - logger.log: "Test gesperrt: Zuendung an oder Nachlauf-Timer laeuft"
+            - logger.log: "Test blocked: ignition on or after-run timer still running"

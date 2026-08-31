@@ -1,170 +1,196 @@
 # sprinter_hvac_control
 
-Steuert das originale HVAC-Gebläse des Sprinter wahlweise über die
-Aufbaubatterie statt über den fahrzeugeigenen Controller. Zusätzlich gibt es
-einen ESPHome-Webserver und native HomeAssistant-Anbindung.
+Runs the Sprinter's original HVAC blower off the leisure/house battery
+instead of the vehicle's own controller. Also adds an ESPHome web server
+and native HomeAssistant integration.
 
-Verwendet einen IBT-2-PWM-Treiber (BTS7960) plus ein
-`ESP32_Relay_30A_X2_V1.1`-Board. Das ESP32-Board steuert sowohl die beiden
-Relais als auch den IBT-2 selbst - die Steuerung ist damit zentral an einer
-Stelle, Original-Controller und IBT-2 können sich nie gegenseitig
-beeinflussen.
+Uses an IBT-2 PWM driver (BTS7960) plus an `ESP32_Relay_30A_X2_V1.1` board.
+The ESP32 board controls both the relays and the IBT-2 itself - control is
+therefore centralized in one place, and the OEM controller and the IBT-2
+can never interfere with each other.
 
-## Funktionsprinzip
+## How it works
 
-Es gibt genau eine Bedien-Entity in HomeAssistant/Web-UI: **"HVAC Fan
-(Battery)"** - ein Dropdown (`select`) mit den Optionen `Off` / `Low` /
-`Medium` / `High`.
+There is exactly one user-facing entity in HomeAssistant/the web UI:
+**"HVAC Fan (Battery)"** - a dropdown (`select`) with the options `Off` /
+`Low` / `Medium` / `High`.
 
-> Technisch als `select` statt als ESPHome `fan:`-Domain umgesetzt: die
-> aktuelle Template-Fan-Komponente von ESPHome ist trigger-/publish-state-
-> basiert (Zustand wird optimistisch gesetzt, *danach* feuern
-> `on_turn_on`/`on_speed_set`) und hat bekannte Reihenfolge-Probleme
-> zwischen Ein-/Ausschalten und Stufe setzen. Für eine sicherheitsrelevante
-> Umschaltung wollen wir die exakte Sequenz selbst in der Hand haben -
-> `select` mit `set_action` ist dafür die robustere, seit Jahren stabile
-> Wahl. Für HA fühlt sich das identisch an: ein Bedienelement.
+> Implemented as a `select` rather than ESPHome's `fan:` domain on purpose:
+> the current template fan component is trigger-/publish-state-based
+> (state is set optimistically, *then* `on_turn_on`/`on_speed_set` fire)
+> and has known ordering issues between turning on and setting speed. For a
+> safety-relevant switch-over we want to own the exact sequence ourselves -
+> `select` with `set_action` is the more robust, long-stable choice for
+> that. From HA's point of view it feels the same: one control.
 
-- **Off (Default/Fail-Safe):** Beide Relais unbestromt → Original-Controller
-  ist an das Gebläse angeschlossen und funktioniert wie ab Werk. Der IBT-2
-  ist komplett vom Motor getrennt und softwareseitig deaktiviert (`R_EN`/
-  `L_EN` low). Dieser Zustand ist auch aktiv, wenn der ESP32 keinen Strom
-  hat, abgestürzt ist oder gerade bootet.
-- **Low/Medium/High:** Relais legen die Motorleitungen auf den IBT-2 um,
-  der aktive Kanal (`R_EN`+`RPWM` oder `L_EN`+`LPWM`, siehe unten) wird
-  scharf geschaltet und die gewählte Stufe per PWM gefahren.
+- **Off (default/fail-safe):** both relays de-energized → the OEM
+  controller is connected to the blower and works exactly as from the
+  factory. The IBT-2 is fully disconnected from the motor and disabled in
+  software (`R_EN`/`L_EN` low). This is also the state whenever the ESP32
+  has no power, has crashed, or is still booting.
+- **Low/Medium/High:** relays switch the motor leads over to the IBT-2, the
+  active channel (`R_EN`+`RPWM` or `L_EN`+`LPWM`, see below) is armed, and
+  the selected level is driven via PWM.
 
-Die Umschaltreihenfolge ist immer so, dass PWM-Signal und H-Brücken-Enable
-nie aktiv sind, während die Relais gerade umschalten, und die Relais nie auf
-Batterie stehen, ohne dass der IBT-2 danach auch wirklich freigegeben wird -
-und umgekehrt beim Ausschalten zuerst PWM/Enable weg, dann erst die Relais
-zurück auf Original. Siehe `script.ibt2_engage`/`script.ibt2_disengage` in
-`relay-2ch-hvac.yaml` für die genaue Sequenz.
+The switch-over sequence always keeps the PWM signal and H-bridge enable
+inactive while the relays are actually switching, and never leaves the
+relays on battery without the IBT-2 actually being armed afterwards - and
+the reverse on the way back: PWM/enable off first, then the relays return
+to OEM. See `script.ibt2_engage`/`script.ibt2_disengage` in
+`relay-2ch-hvac.yaml` for the exact sequence.
 
-### Zündungs-/D+-Interlock
+### Ignition/D+ interlock
 
-Zusätzlich zur manuellen Auswahl gibt es ein Hardware-Interlock über ein
-Zündungs-/Laufsignal (D+ vom Lichtmaschinen-Anschluss, oder z.B. Klemme 15 -
-je nachdem, was am Fahrzeug leicht zugänglich ist):
+On top of the manual selection there is a hardware interlock driven by an
+ignition/running signal (D+ from the alternator, or e.g. terminal 15 -
+whichever is easiest to tap on the vehicle):
 
-- **Zündung/Motor an → sofort zurück auf Original-Controller.** Sobald das
-  D+-Signal aktiv wird, schaltet die Software augenblicklich auf `Off`
-  zurück (`binary_sensor.ignition_active`, `on_press`) - unabhängig davon,
-  was gerade in HA eingestellt war. Kein Warten, keine Ausnahme.
-- **Zündung/Motor aus → Nachlauf-Timer, dann erst Freigabe.** Der
-  Original-Gebläsecontroller kann nach dem Abstellen noch kurz nachlaufen.
-  Erst `ignition_off_delay` (Default: 5 Minuten, oben in `substitutions:`
-  anpassbar) nach Zündung AUS wird der Batteriebetrieb überhaupt wieder
-  freigegeben (`battery_mode_allowed`). Ein Auswahlversuch davor wird
-  abgelehnt und im Log vermerkt.
+- **Ignition/engine on → immediately back to the OEM controller.** As soon
+  as the D+ signal goes active, the software instantly switches back to
+  `Off` (`binary_sensor.ignition_active`, `on_press`) - regardless of
+  whatever was selected in HA. No waiting, no exception.
+- **Ignition/engine off → after-run timer, only then re-armed.** The OEM
+  blower controller may keep running briefly after shutdown. Only
+  `ignition_off_delay` (default: 5 minutes, adjustable in `substitutions:`
+  at the top of `relay-2ch-hvac.yaml`) after ignition OFF does the system
+  re-arm battery mode (`battery_mode_allowed`). A selection attempt before
+  that is rejected and logged.
 
-**D+-Sense-Eingang (GPIO34):** D+ liegt auf Fahrzeugspannung (12-14V+, beim
-Laden ggf. Spannungsspitzen) - das darf **niemals** direkt an einen ESP32-
-GPIO (max. 3.3V). Umgesetzt über einen **PC817C**-Optokoppler (galvanisch
-getrennt, kein direkter Bezug zwischen Fahrzeugelektrik und ESP32-Logik nötig):
+**D+ sense input (GPIO34):** D+ sits at vehicle voltage (12-14V+, possibly
+higher spikes while charging) - that must **never** go directly into an
+ESP32 GPIO (max. 3.3V). Implemented through a **PC817C** optocoupler
+(galvanically isolated, no direct electrical reference needed between the
+vehicle electrics and the ESP32 logic):
 
-- **LED-Seite** (Pin 1 Anode / Pin 2 Kathode): D+ → Vorwiderstand → Pin 1,
-  Pin 2 → Fahrzeug-/Chassis-Masse.
-  Vorwiderstand so wählen, dass der LED-Strom ~10mA bleibt: bei 13-15V
-  Bordspannung ca. **1,2kΩ, 1/2W** (`R = (U_D+ - 1.2V) / 0.01A`).
-- **Transistor-Seite** (Pin 4 Kollektor / Pin 3 Emitter): Pin 3 → ESP32-GND,
-  Pin 4 → **10kΩ-Pull-up nach 3.3V** UND → GPIO34. GPIO34 ist als reiner
-  Input-Pin ohne internes Pull-up **zwingend** auf diesen externen Pull-up
-  angewiesen.
-- Logik ist dadurch aktiv-low am Pin (Optokoppler zieht bei anliegendem D+
-  den Kollektor gegen GND) - in der YAML-Config bereits per `inverted: true`
-  kompensiert, `binary_sensor.ignition_active` meldet trotzdem "an", wenn
-  D+ aktiv ist.
+- **LED side** (pin 1 anode / pin 2 cathode): D+ → series resistor → pin 1,
+  pin 2 → vehicle/chassis ground.
+  Size the series resistor so LED current stays around ~10mA: at 13-15V
+  system voltage, roughly **1.2kΩ, 1/2W** (`R = (V_D+ - 1.2V) / 0.01A`).
+- **Transistor side** (pin 4 collector / pin 3 emitter): pin 3 → ESP32 GND,
+  pin 4 → **10kΩ pull-up to 3.3V** AND → GPIO34. GPIO34 is an input-only
+  pin with no internal pull-up, so this external pull-up is **mandatory** -
+  without it the pin floats.
+- This makes the pin logic active-low (the optocoupler pulls the collector
+  toward GND while D+ is present) - already compensated in the YAML config
+  via `inverted: true`, so `binary_sensor.ignition_active` still reports
+  "on" when D+ is actually active.
 
-GPIO34 ist bewusst gewählt, weil es ein reiner Input-Pin ist (unkritisch für
-Boot-Strapping) und hier ohnehin nur digital gelesen wird.
+> **Ready-made module instead of discrete parts:** a cheap off-the-shelf
+> "2-channel PC817 optocoupler isolation module" (like the one you linked)
+> already integrates exactly this circuit - the LED-side series resistor
+> and (usually) the output-side pull-up, on a small screw-terminal board
+> with `VCC` / `GND` / `IN` / `OUT` per channel. If you use one of those
+> instead of a bare PC817C: `IN`/`GND` on that channel → D+ / vehicle
+> ground, `VCC` → ESP32 3.3V, `OUT` → GPIO34. Two things you should verify
+> on your specific module before wiring it to D+ (I couldn't fetch the
+> Amazon listing from this environment to confirm them myself):
+> 1. its onboard LED resistor is actually sized for a 12-14V input and not
+>    only for 3.3-5V logic-to-logic isolation (most modules sold as
+>    "isolation module" for microcontrollers are fine with automotive 12V
+>    sensing - that's their most common use case - but check the listing);
+> 2. whether its `OUT` is active-high or active-low with `VCC` tied to
+>    3.3V - if it comes out active-high instead of the active-low behavior
+>    assumed above, drop `inverted: true` from `binary_sensor.ignition_active`
+>    in `relay-2ch-hvac.yaml`. Easiest way to be sure: apply 12V to `IN`
+>    and measure `OUT` with a multimeter once before trusting it in the
+>    interlock logic.
 
-## Testaufbau
+GPIO34 was chosen deliberately because it's a pure input pin (no
+boot-strapping concerns) and is only ever read digitally here.
 
-Vor dem Einbau wird auf einem separaten, gebraucht gekauften Gebläse
-inkl. Original-Controller getestet - nicht am verbauten Fahrzeugteil.
-Relais-Verdrahtung, IBT-2-Kanalwahl (siehe Test-Buttons oben) und das
-D+-Interlock lassen sich damit gefahrlos durchspielen, bevor irgendetwas
-im Fahrzeug angeschlossen wird.
+## Bench test setup
 
-## Stromversorgung
+Before installing anything in the van, this is tested on a separate,
+used blower + OEM controller assembly - not on the part actually fitted to
+the vehicle. Relay wiring, IBT-2 channel selection (see the test buttons
+below), and the D+ interlock can all be exercised safely on the bench
+before anything is connected in the vehicle.
 
-Die 3-Pol-Klemme "7-28V GND 5V" oben auf dem Relay-Board nimmt die
-Eingangsspannung (hier: 12V) und gibt daraus per Onboard-Buck-Regler
-(Aufdruck u.a. "...2596S", 33µH-Spule daneben - typische LM2596/MP2596-
-artige 3A-Step-Down-Familie) geregelte 5V aus derselben Klemme zurück.
-Diese 5V versorgen ESP32-Modul + beide Relaisspulen (je ~70-90mA) und
-reichen mit deutlichem Spielraum auch für die **Logikversorgung** (`VCC`)
-des IBT-2 - dessen Optokoppler/Treiber-IC auf der 5V-Logikseite ziehen nur
-wenige mA, das ist keine nennenswerte Zusatzlast.
+## Power supply
 
-Wichtig: Das gilt **nur** für die IBT-2-Logikversorgung. Der eigentliche
-Motorstrom (`B+`/`B-`/`M+`/`M-`) läuft **nicht** über diesen Regler, sondern
-direkt von der Aufbaubatterie zum IBT-2 und von dort zum Motor (siehe oben) -
-das wäre für den kleinen Onboard-Regler viel zu viel Strom. Vor dem
-Erstanschluss trotzdem kurz mit dem Multimeter nachmessen, dass die 5V-Klemme
-unter Last (Relais an + IBT-2-Logik) stabil bleibt - der genaue Regler-Typ
-ist vom Foto nicht hundertprozentig sicher zu identifizieren.
+The 3-pin "7-28V GND 5V" terminal block on the relay board takes the input
+voltage (here: 12V) and, via an onboard buck regulator, outputs regulated
+5V from the same terminal block. That 5V rail powers the ESP32 module and
+both relay coils (~70-90mA each) and should have comfortable headroom left
+for the IBT-2's **logic supply** (`VCC`) too - its opto-isolators/driver IC
+on the 5V logic side only draw a few mA, not a meaningful extra load.
+
+> **Honesty check on the regulator identification:** I read the silkscreen
+> off a slightly blurry photo ("...2596S" next to a 33µH inductor) and
+> inferred the common LM2596/MP2596-style 3A buck-converter family from
+> that - a websearch for the exact marking ("JM93MRP") turned up nothing,
+> and I could not fetch a datasheet to confirm it. That's an educated guess
+> from the visual topology (TO-263 regulator + inductor + electrolytic caps
+> = standard non-isolated buck converter), **not** a verified fact. Please
+> measure the 5V terminal with a multimeter under load (relays energized +
+> IBT-2 logic connected) before relying on it, rather than trusting this
+> identification.
+
+Important: this only covers the IBT-2's **logic** supply. The actual motor
+current (`B+`/`B-`/`M+`/`M-`) does **not** run through this regulator at
+all - it goes straight from the leisure battery to the IBT-2 and from there
+to the motor (see below) - that would be far too much current for the
+small onboard regulator.
 
 ## Hardware
 
-- **ESP32_Relay_30A_X2_V1.1** (Fotos in `information/`): ESP32-32E-Modul,
-  2x Songle SLA-05VDC-SL-C Wechsler-Relais (30A/240VAC bzw. 30A/28VDC),
-  7-28V-Eingang mit Buck-Regler auf 5V.
-- **IBT-2 / BTS7960** Motortreiber, versorgt aus der Aufbaubatterie.
+- **ESP32_Relay_30A_X2_V1.1** (photos in `information/`): ESP32-32E module,
+  2x Songle SLA-05VDC-SL-C changeover relays (30A/240VAC resp. 30A/28VDC),
+  7-28V input with a buck regulator down to 5V.
+- **IBT-2 / BTS7960** motor driver, powered from the leisure battery.
 
-### Pinbelegung ESP32_Relay_30A_X2_V1.1
+### ESP32_Relay_30A_X2_V1.1 pinout
 
-Alle GPIOs unten sind laut Bottom-Silkscreen (`information/*_Bottom.jpg`)
-auf JP1/JP2 herausgeführt und mit keinem anderen Onboard-Verbraucher belegt.
+All GPIOs below are broken out on JP1/JP2 per the bottom silkscreen
+(`information/*_Bottom.jpg`) and aren't used by any other onboard consumer.
 
-| Signal                    | GPIO | Funktion |
-|---------------------------|------|----------|
-| Onboard-LED                | G5   | Status-LED des Relay-Boards |
-| Relay 1                     | G12  | schaltet eine Motorleitung des Gebläses |
-| Relay 2                     | G13  | schaltet die zweite Motorleitung des Gebläses |
-| IBT-2 `RPWM` (Kanal R)      | G4   | PWM-Drehzahlsignal Kanal R (20 kHz) |
-| IBT-2 `R_EN` (Kanal R)      | G16  | Software-Interlock Kanal R |
-| IBT-2 `LPWM` (Kanal L)      | G17  | PWM-Drehzahlsignal Kanal L (20 kHz) |
-| IBT-2 `L_EN` (Kanal L)      | G18  | Software-Interlock Kanal L |
-| Zündung/D+ Sense            | G34  | erkennt Zündung/Motor an (siehe Spannungsteiler oben) |
+| Signal                      | GPIO | Function |
+|------------------------------|------|----------|
+| Onboard LED                   | G5   | relay board status LED |
+| Relay 1                        | G12  | switches one blower motor lead |
+| Relay 2                        | G13  | switches the other blower motor lead |
+| IBT-2 `RPWM` (channel R)       | G4   | channel R PWM speed signal (20 kHz) |
+| IBT-2 `R_EN` (channel R)       | G16  | channel R software interlock |
+| IBT-2 `LPWM` (channel L)       | G17  | channel L PWM speed signal (20 kHz) |
+| IBT-2 `L_EN` (channel L)       | G18  | channel L software interlock |
+| Ignition/D+ sense               | G34  | detects ignition/engine on (see optocoupler above) |
 
-Aktuell sind **beide** IBT-2-Kanäle (R und L) softwareseitig ansteuerbar,
-weil noch nicht feststeht, welcher davon das Gebläse in die richtige
-(Werks-)Richtung dreht. Über die zwei Test-Buttons in ESPHome/HA
-(`IBT-2 Test: Kanal R/L`, 3s Testpuls bei 25%) einmal ausprobieren, welcher
-Kanal korrekt dreht, dann in `relay-2ch-hvac.yaml` den `initial_value` von
-`ibt2_use_channel_l` entsprechend setzen (`false` = Kanal R, `true` = Kanal
-L). Danach kann der nicht benötigte Kanal (`L_EN`/`LPWM` bzw. `R_EN`/`RPWM`)
-optional hardwareseitig fest verdrahtet und aus der Config entfernt werden -
-Kanal R_EN/L_EN fest auf 5V, das zugehörige *PWM fest auf GND.
+Right now **both** IBT-2 channels (R and L) are software-switchable,
+because it isn't known yet which one spins the blower in the correct
+(factory) direction. Use the two commissioning buttons in ESPHome/HA
+(`IBT-2 Test: Channel R/L`, a 3s test pulse at 25%) to find out which
+channel is correct, then set `ibt2_use_channel_l`'s `initial_value` in
+`relay-2ch-hvac.yaml` accordingly (`false` = channel R, `true` = channel
+L). After that, the unused channel (`L_EN`/`LPWM` resp. `R_EN`/`RPWM`) can
+optionally be hardwired in hardware and removed from the config - the
+unused channel's `*_EN` tied fixed to 5V, its `*PWM` tied fixed to GND.
 
-### IBT-2-Verdrahtung
+### IBT-2 wiring
 
-- `RPWM` → GPIO4, `R_EN` → GPIO16 (ESP32-Board, Kanal R)
-- `LPWM` → GPIO17, `L_EN` → GPIO18 (ESP32-Board, Kanal L)
-  (beide Kanäle vorerst software-geschaltet, siehe oben - später ggf. den
-  ungenutzten Kanal hardwired festlegen)
-- `VCC` (Logik) → 5V, `GND` → gemeinsame Masse mit ESP32-Board
-- `B+`/`B-` → Aufbaubatterie (abgesichert!)
-- `M+`/`M-` → auf die Wechsler-Kontakte (NO) von Relay 1/2
+- `RPWM` → GPIO4, `R_EN` → GPIO16 (ESP32 board, channel R)
+- `LPWM` → GPIO17, `L_EN` → GPIO18 (ESP32 board, channel L)
+  (both channels software-switched for now, see above - optionally
+  hardwire the unused one later once the correct direction is known)
+- `VCC` (logic) → 5V, `GND` → common ground with the ESP32 board
+- `B+`/`B-` → leisure battery (fused!)
+- `M+`/`M-` → to the changeover (NO) contacts of Relay 1/2
 
-### Relais-Verdrahtung (pro Relais)
+### Relay wiring (per relay)
 
-- **COM** → Motorleitung zum Gebläse
-- **NC** (unbestromt) → Original-Sprinter-Controller
-- **NO** (bestromt) → IBT-2 `M+`/`M-`
+- **COM** → motor lead to the blower
+- **NC** (de-energized) → OEM Sprinter controller
+- **NO** (energized) → IBT-2 `M+`/`M-`
 
-Beide Relais schalten **immer gemeinsam** beide Motorleitungen um (siehe
-`fan_source_battery` in `relay-2ch-hvac.yaml`), damit Original-Controller und
-IBT-2 nie gleichzeitig an einer der beiden Leitungen hängen können.
+Both relays **always** switch both motor leads together (see
+`fan_source_battery` in `relay-2ch-hvac.yaml`), so the OEM controller and
+the IBT-2 can never both be connected to either lead at the same time.
 
-## ESPHome-Konfiguration
+## ESPHome configuration
 
-- `relay-2ch-hvac.yaml` - Board-spezifische Konfiguration (Relais, IBT-2,
-  Fan-Entity)
-- `.basics.yaml` - gemeinsame Basis (WLAN, API, OTA, Web-Server, Watchdog);
-  wird per `packages:` eingebunden
-- `secrets.yaml.example` - Vorlage für `secrets.yaml` (WLAN-Zugangsdaten,
-  API-Key, Passwörter). Kopieren nach `secrets.yaml` und echte Werte
-  eintragen - diese Datei wird nicht committet (`.gitignore`).
+- `relay-2ch-hvac.yaml` - board-specific config (relays, IBT-2, fan control
+  entity)
+- `.basics.yaml` - shared base config (WiFi, API, OTA, web server,
+  watchdog); pulled in via `packages:`
+- `secrets.yaml.example` - template for `secrets.yaml` (WiFi credentials,
+  API key, passwords). Copy to `secrets.yaml` and fill in real values -
+  that file is never committed (`.gitignore`).
