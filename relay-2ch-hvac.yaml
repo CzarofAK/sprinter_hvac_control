@@ -1,0 +1,33 @@
+substitutions:
+  name: relay-2ch-hvac  
+
+packages:
+  basics: !include .basics.yaml
+  
+esphome:
+  name: ${name}
+  friendly_name: ${name}
+
+esp32:
+  variant: esp32
+
+output:
+  - platform: gpio
+    id: output_led
+    pin: 5
+
+light:
+  - platform: binary
+    name: LED
+    id: light_led
+    output: output_led
+
+switch:
+  - platform: gpio
+    name: Relay 1
+    id: relay_1
+    pin: 12
+  - platform: gpio
+    name: Relay 2
+    id: relay_2
+    pin: 13
