@@ -51,5 +51,5 @@ interval:
               - not:
                   wifi.ap_active:
           then:
-            - logger.log: "Weder WLAN noch Fallback-AP - Neustart"
+            - logger.log: "Neither WiFi nor fallback AP - restarting"
             - button.press: restart_button
