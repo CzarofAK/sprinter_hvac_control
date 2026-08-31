@@ -60,16 +60,20 @@ light:
     output: output_led
 
 binary_sensor:
-  # Zündungs-/Laufsignal des Fahrzeugs (D+ vom LiMa, oder Klemme 15 -
-  # was verfügbar ist). ACHTUNG: liegt auf Fahrzeugspannung (12-14V+) und
-  # MUSS über einen Spannungsteiler/Optokoppler auf 3.3V heruntergesetzt
-  # werden, bevor es an den GPIO geht - siehe README, "D+ Sense-Eingang".
+  # Zündungs-/Laufsignal des Fahrzeugs (D+ vom LiMa, oder Klemme 15 - was
+  # verfügbar ist), galvanisch getrennt über einen PC817C-Optokoppler auf
+  # den 3.3V-Logikpegel des ESP32 - siehe README, "D+ Sense-Eingang".
+  # `inverted: true`, weil der Optokoppler-Ausgang aktiv-low ist (Kollektor
+  # wird bei anliegendem D+ gegen GND gezogen). GPIO34 hat als Input-only-Pin
+  # KEINEN internen Pull-up - der externe 10kΩ-Pull-up am Kollektor (siehe
+  # README) ist zwingend, sonst liest der Pin undefiniert.
   - platform: gpio
     name: "Ignition / D+ Active"
     id: ignition_active
     pin:
       number: 34
       mode: INPUT
+      inverted: true
     filters:
       - delayed_on: 200ms
       - delayed_off: 200ms

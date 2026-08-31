@@ -60,12 +60,51 @@ je nachdem, was am Fahrzeug leicht zugänglich ist):
 
 **D+-Sense-Eingang (GPIO34):** D+ liegt auf Fahrzeugspannung (12-14V+, beim
 Laden ggf. Spannungsspitzen) - das darf **niemals** direkt an einen ESP32-
-GPIO (max. 3.3V). Vor GPIO34 gehört ein Spannungsteiler, der bei aktivem D+
-sauber auf ~3.3V teilt (z.B. 10kΩ oben / 3.3kΩ unten gegen GND, plus eine
-3.3V-Z-Diode oder TVS parallel zum unteren Widerstand als Spitzenschutz),
-oder alternativ ein kleiner Optokoppler. GPIO34 ist bewusst gewählt, weil es
-ein reiner Input-Pin ist (kein internes Pull-up/down, aber unkritisch für
-Boot-Strapping) und ohnehin nur digital gelesen wird.
+GPIO (max. 3.3V). Umgesetzt über einen **PC817C**-Optokoppler (galvanisch
+getrennt, kein direkter Bezug zwischen Fahrzeugelektrik und ESP32-Logik nötig):
+
+- **LED-Seite** (Pin 1 Anode / Pin 2 Kathode): D+ → Vorwiderstand → Pin 1,
+  Pin 2 → Fahrzeug-/Chassis-Masse.
+  Vorwiderstand so wählen, dass der LED-Strom ~10mA bleibt: bei 13-15V
+  Bordspannung ca. **1,2kΩ, 1/2W** (`R = (U_D+ - 1.2V) / 0.01A`).
+- **Transistor-Seite** (Pin 4 Kollektor / Pin 3 Emitter): Pin 3 → ESP32-GND,
+  Pin 4 → **10kΩ-Pull-up nach 3.3V** UND → GPIO34. GPIO34 ist als reiner
+  Input-Pin ohne internes Pull-up **zwingend** auf diesen externen Pull-up
+  angewiesen.
+- Logik ist dadurch aktiv-low am Pin (Optokoppler zieht bei anliegendem D+
+  den Kollektor gegen GND) - in der YAML-Config bereits per `inverted: true`
+  kompensiert, `binary_sensor.ignition_active` meldet trotzdem "an", wenn
+  D+ aktiv ist.
+
+GPIO34 ist bewusst gewählt, weil es ein reiner Input-Pin ist (unkritisch für
+Boot-Strapping) und hier ohnehin nur digital gelesen wird.
+
+## Testaufbau
+
+Vor dem Einbau wird auf einem separaten, gebraucht gekauften Gebläse
+inkl. Original-Controller getestet - nicht am verbauten Fahrzeugteil.
+Relais-Verdrahtung, IBT-2-Kanalwahl (siehe Test-Buttons oben) und das
+D+-Interlock lassen sich damit gefahrlos durchspielen, bevor irgendetwas
+im Fahrzeug angeschlossen wird.
+
+## Stromversorgung
+
+Die 3-Pol-Klemme "7-28V GND 5V" oben auf dem Relay-Board nimmt die
+Eingangsspannung (hier: 12V) und gibt daraus per Onboard-Buck-Regler
+(Aufdruck u.a. "...2596S", 33µH-Spule daneben - typische LM2596/MP2596-
+artige 3A-Step-Down-Familie) geregelte 5V aus derselben Klemme zurück.
+Diese 5V versorgen ESP32-Modul + beide Relaisspulen (je ~70-90mA) und
+reichen mit deutlichem Spielraum auch für die **Logikversorgung** (`VCC`)
+des IBT-2 - dessen Optokoppler/Treiber-IC auf der 5V-Logikseite ziehen nur
+wenige mA, das ist keine nennenswerte Zusatzlast.
+
+Wichtig: Das gilt **nur** für die IBT-2-Logikversorgung. Der eigentliche
+Motorstrom (`B+`/`B-`/`M+`/`M-`) läuft **nicht** über diesen Regler, sondern
+direkt von der Aufbaubatterie zum IBT-2 und von dort zum Motor (siehe oben) -
+das wäre für den kleinen Onboard-Regler viel zu viel Strom. Vor dem
+Erstanschluss trotzdem kurz mit dem Multimeter nachmessen, dass die 5V-Klemme
+unter Last (Relais an + IBT-2-Logik) stabil bleibt - der genaue Regler-Typ
+ist vom Foto nicht hundertprozentig sicher zu identifizieren.
 
 ## Hardware
 
