@@ -123,12 +123,11 @@ button) before anything is connected in the vehicle.
 
 ## Power supply
 
-The 3-pin "7-28V GND 5V" terminal block on the relay board takes the input
-voltage (here: 12V) and, via an onboard buck regulator, outputs regulated
-5V from the same terminal block. That 5V rail powers the ESP32 module and
-both relay coils (~70-90mA each) and should have comfortable headroom left
-for the MD30C's **logic supply** too - its control circuitry on the 5V
-logic side only draws a few mA, not a meaningful extra load.
+The ESP32_Relay_30A_X2_V1.1's 3-pin "7-28V GND 5V" terminal block takes
+the input voltage (here: 12V) and, via an onboard buck regulator, outputs
+regulated 5V from the same terminal block. That 5V rail powers the ESP32
+module and both relay coils (~70-90mA each) - nothing else needs to draw
+from it.
 
 > **Honesty check on the regulator identification:** I read the silkscreen
 > off a slightly blurry photo ("...2596S" next to a 33µH inductor) and
@@ -137,29 +136,32 @@ logic side only draws a few mA, not a meaningful extra load.
 > and I could not fetch a datasheet to confirm it. That's an educated guess
 > from the visual topology (TO-263 regulator + inductor + electrolytic caps
 > = standard non-isolated buck converter), **not** a verified fact. Please
-> measure the 5V terminal with a multimeter under load (relays energized +
-> MD30C logic connected) before relying on it, rather than trusting this
+> measure the 5V terminal with a multimeter under load (both relays
+> energized) before relying on it, rather than trusting this
 > identification.
 
-Important: this only covers the MD30C's **logic** supply. The actual motor
-current (`B+`/`B-`/`M+`/`M-`) does **not** run through this regulator at
-all - it goes straight from the leisure battery to the MD30C and from there
-to the motor (see below) - that would be far too much current for the
-small onboard regulator.
+The MD30C is **entirely separate** from that 5V rail - per its own user's
+manual (Cytron, Rev 1.4), it has no dedicated logic-supply pin at all. Its
+`POWER` terminal (5-30V, the same leisure-battery feed that also drives the
+motor stage) is regulated down to logic voltage **internally on the MD30C
+board itself**. The only thing connecting it to the ESP32 side is the 3-pin
+signal header (`GND`/`PWM`/`DIR`) - and even `DIR` on that header isn't
+used (see wiring below). So there's no headroom question to work out here
+at all, unlike the earlier IBT-2 revision.
 
 ## Hardware
 
 - **ESP32_Relay_30A_X2_V1.1** (photos in `information/`): ESP32-32E module,
   2x Songle SLA-05VDC-SL-C changeover relays (30A/240VAC resp. 30A/28VDC),
   7-28V input with a buck regulator down to 5V.
-- **Cytron MD30C** motor driver (5-30V, 30A continuous/80A peak, PWM+DIR
-  logic interface, 3.3V/5V-compatible), powered from the leisure battery.
+- **Cytron MD30C** motor driver (5-30V, 30A continuous/80A peak for up to
+  1s, PWM+DIR logic interface, logic input HIGH = 3-5.5V / LOW = 0-0.5V
+  per its datasheet - ESP32's 3.3V GPIO clears the 3V HIGH threshold with
+  a bit of margin, not a lot), powered directly from the leisure battery.
   Sized against the blower's expected draw (OEM fuse in that circuit is
   typically 20-30A) with real headroom, unlike the 20A MD20A or the
   20A-continuous-despite-"30A"-branding generic MOSFET modules also
-  considered - check the MD30C's onboard mode switch/jumper is set to
-  accept **external** PWM+DIR rather than its own onboard
-  potentiometer/switches.
+  considered.
 
 ### ESP32_Relay_30A_X2_V1.1 pinout
 
@@ -176,33 +178,58 @@ All GPIOs below are broken out on JP1/JP2 per the bottom silkscreen
 
 GPIO16/17/18 (used by the earlier IBT-2 revision for its second channel
 and enable pins) are free/unused now - the MD30C only needs one PWM
-signal.
+signal from the ESP32.
 
 ### MD30C wiring
 
-- `PWM` → GPIO4 (ESP32 board)
-- `DIR` → hardwired directly to `GND` on the MD30C itself, **not** to a
-  GPIO. The blower only ever needs one direction, so there's nothing to
-  switch at runtime; if it spins the wrong way once wired up, swap the two
-  motor leads at `M+`/`M-` instead of touching `DIR` or the config -
-  electrically identical, no reflash needed. (If your MD30C variant needs
-  `DIR` pulled to 3.3V/5V instead of GND for the correct direction, wire it
-  there instead - either fixed level works, only the polarity differs.)
-- `VCC`/`5V` (logic) → 5V, `GND` → common ground with the ESP32 board
-- `VIN`/`B+`/`B-` (motor power, exact naming varies) → leisure battery
-  (fused!)
-- `M+`/`M-` → to the changeover (NO) contacts of Relay 1/2
+Per the Cytron MD30C user's manual (Rev 1.4):
 
-Confirm the exact terminal labels against the MD30C you receive - the
-naming above is generic pending the physical board (photos will help
-narrow it down once it arrives, same as we did for the IBT-2's `information/`
-photos above).
+- **Jumpers:** `JP4` = Don't Care (X), `JP6` = `EXT PWM` - this switches
+  the board from its standalone onboard-potentiometer mode into
+  microcontroller-controlled mode. Do this *after* the standalone bench
+  check below, not before.
+- **3-pin `INPUT` header** (`GND` / `PWM` / `DIR`, in that order):
+  - `PWM` → GPIO4 on the ESP32 board.
+  - `GND` → common ground with the ESP32 board (this is the logic
+    reference ground for the signal header, separate from the heavy
+    `POWER`/`MOTOR` terminal wiring below - tie both boards' grounds
+    together somewhere, e.g. at the battery negative).
+  - `DIR` → hardwired directly to `GND` (either right there on the
+    header, or with a jumper wire) - **not** to a GPIO. Per the MD30C's
+    truth table, `PWM=High, DIR=Low` drives Output A; the blower only
+    ever needs one direction, so there's nothing to switch at runtime.
+    If it spins the wrong way once wired up, swap the two motor leads at
+    `MOTOR A`/`B` instead of touching `DIR` or the config - electrically
+    identical, no reflash needed. Bonus: the manual explicitly warns to
+    have `DIR` or `PWM` at LOW when power comes on - hardwiring `DIR` to
+    GND satisfies that automatically, even before the ESP32 has booted.
+- **`POWER` terminal** (`+`/`-`) → leisure battery, fused. This is the
+  *only* power input the MD30C needs - it also derives its own logic
+  supply from here internally, nothing extra required from the ESP32
+  board's 5V rail.
+- **`MOTOR` terminal** (`A`/`B`) → to the changeover (NO) contacts of
+  Relay 1/2. ⚠️ The manual is explicit: **connecting the battery to the
+  `MOTOR` terminal instead of `POWER` burns the MOSFETs, and that's not
+  covered under warranty** - double-check before powering up.
+- For current draw >20A (our expected range), the manual recommends
+  soldering the wires directly to the pads on the PCB's bottom layer
+  rather than relying only on the screw terminals.
+
+**Bench-test the MD30C completely standalone before wiring it to the ESP32
+at all:** temporarily set `JP4`=`INT POT`, `JP6`=`INT PWM`, connect
+battery+motor, and use the onboard Test Button A/B (with the onboard
+speed potentiometer) to confirm the board and motor actually work - no
+microcontroller needed for this check. Only then switch the jumpers to
+`JP4`=Don't Care, `JP6`=`EXT PWM` and wire up the ESP32 signal header.
+This is exactly the standalone check the IBT-2 didn't give us, and would
+have caught its failure immediately instead of after a long wiring-level
+debugging session.
 
 ### Relay wiring (per relay)
 
 - **COM** → motor lead to the blower
 - **NC** (de-energized) → OEM Sprinter controller
-- **NO** (energized) → MD30C `M+`/`M-`
+- **NO** (energized) → MD30C `MOTOR A`/`B`
 
 Both relays **always** switch both motor leads together (see
 `fan_source_battery` in `relay-2ch-hvac.yaml`), so the OEM controller and
