@@ -1,0 +1,6 @@
+# Echte Secrets nie committen
+secrets.yaml
+
+# ESPHome build artifacts
+.esphome/
+*.bin
