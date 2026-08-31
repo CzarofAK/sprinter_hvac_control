@@ -18,16 +18,6 @@ esp32:
   variant: esp32
 
 globals:
-  # false = channel R active (RPWM/R_EN), true = channel L active
-  # (LPWM/L_EN). Use the test buttons below once to determine the correct
-  # rotation direction, then flip initial_value accordingly. Once that's
-  # known, the unused channel can also be hardwired in hardware and
-  # removed from this config.
-  - id: ibt2_use_channel_l
-    type: bool
-    restore_value: false
-    initial_value: "false"
-
   # Battery mode is only allowed while ignition/D+ is off AND the after-run
   # timer has elapsed. See binary_sensor.ignition_active and
   # script.ignition_off_delay_script below.
@@ -41,16 +31,21 @@ output:
     id: output_led
     pin: 5
 
-  # IBT-2 RPWM/LPWM: blower speed signal, depending on the active channel
-  # (see ibt2_use_channel_l). 20kHz = above the audible range. Only ever
-  # set via the scripts below, never directly.
+  # MD30C `PWM` input: blower speed signal. 20kHz = above the audible
+  # range and matches the MD30C's supported PWM frequency range. Only
+  # ever set via the scripts below, never directly.
+  #
+  # `DIR` is NOT wired to a GPIO at all - it's hardwired directly to GND
+  # on the MD30C itself. The blower only ever needs to spin one way (fan
+  # blades don't do anything useful in reverse), so there's no reason to
+  # burn a GPIO and add software complexity for a direction that never
+  # changes. If the motor turns out to spin the wrong way once wired up,
+  # fix it by swapping the two motor leads at the MD30C's M+/M- terminals
+  # - electrically identical to flipping DIR, but doesn't need a config
+  # change.
   - platform: ledc
-    id: pwm_rpwm
+    id: pwm_motor
     pin: 4
-    frequency: 20000Hz
-  - platform: ledc
-    id: pwm_lpwm
-    pin: 17
     frequency: 20000Hz
 
 light:
@@ -89,7 +84,7 @@ binary_sensor:
       - number.set:
           id: hvac_fan_number
           value: 0
-      - script.execute: ibt2_disengage
+      - script.execute: motor_disengage
     on_release:
       # Ignition goes off -> start the after-run timer; only once it
       # elapses is battery mode re-armed (the OEM blower may still run on
@@ -116,7 +111,7 @@ switch:
 
   # Shared internal switch for the blower's power source.
   # OFF (default/fail-safe) = OEM Sprinter controller
-  # ON                      = leisure battery via the IBT-2
+  # ON                      = leisure battery via the MD30C
   # Only ever driven by the scripts below - no UI element of its own.
   - platform: template
     id: fan_source_battery
@@ -131,58 +126,30 @@ switch:
       - switch.turn_off: relay_1
       - switch.turn_off: relay_2
 
-  # IBT-2 R_EN/L_EN: extra software interlock per channel. The H-bridge is
-  # always armed only AFTER the relays have switched to battery mode, and
-  # disarmed BEFORE switching back to the OEM controller (see
-  # script.ibt2_engage / script.ibt2_disengage). Both internal, no UI
-  # element of their own.
-  - platform: gpio
-    id: ibt2_r_en
-    pin: 16
-    internal: true
-    restore_mode: ALWAYS_OFF
-  - platform: gpio
-    id: ibt2_l_en
-    pin: 18
-    internal: true
-    restore_mode: ALWAYS_OFF
-
 script:
   # Switches to battery mode and drives the given speed (0-100%).
-  # Order matters for safety:
-  #   PWM to 0% -> relays to battery -> matching *_EN armed -> speed set
-  # This keeps PWM inactive while the relays are still switching, and
-  # *_EN is never armed while the OEM controller might still be on the
-  # motor.
-  - id: ibt2_engage
+  # Order matters for safety: PWM stays at 0% until AFTER the relays have
+  # switched to battery, so the MD30C never sees a live PWM signal while
+  # the OEM controller might still be connected to the motor.
+  #
+  # Note there's no separate "enable" step here (unlike the earlier
+  # IBT-2-based design) - the MD30C only has PWM+DIR, no R_EN/L_EN. PWM at
+  # 0% already fully stops the motor, so it doubles as the enable/disable.
+  - id: motor_engage
     parameters:
       percent: int
     then:
-      - output.set_level: { id: pwm_rpwm, level: 0% }
-      - output.set_level: { id: pwm_lpwm, level: 0% }
+      - output.set_level: { id: pwm_motor, level: 0% }
       - switch.turn_on: fan_source_battery
-      - if:
-          condition:
-            lambda: "return id(ibt2_use_channel_l);"
-          then:
-            - switch.turn_on: ibt2_l_en
-            - output.set_level:
-                id: pwm_lpwm
-                level: !lambda "return percent / 100.0f;"
-          else:
-            - switch.turn_on: ibt2_r_en
-            - output.set_level:
-                id: pwm_rpwm
-                level: !lambda "return percent / 100.0f;"
+      - output.set_level:
+          id: pwm_motor
+          level: !lambda "return percent / 100.0f;"
 
-  # Drives PWM to 0%, disables both *_EN, switches the relays back to the
-  # OEM controller. Exact reverse order of ibt2_engage.
-  - id: ibt2_disengage
+  # Drives PWM to 0%, then switches the relays back to the OEM controller.
+  # Exact reverse order of motor_engage.
+  - id: motor_disengage
     then:
-      - output.set_level: { id: pwm_rpwm, level: 0% }
-      - output.set_level: { id: pwm_lpwm, level: 0% }
-      - switch.turn_off: ibt2_r_en
-      - switch.turn_off: ibt2_l_en
+      - output.set_level: { id: pwm_motor, level: 0% }
       - switch.turn_off: fan_source_battery
 
   # After-run timer following ignition OFF. mode: restart -> every
@@ -201,9 +168,9 @@ number:
   # The single user-facing control for the whole system: a 0-100% slider
   # in steps of 10 (round numbers only - no fiddly 42% on a phone).
   # 0%   (default/fail-safe) = OEM Sprinter controller active, the
-  #        vehicle's own switch works normally, IBT-2 fully disconnected
-  #        from the motor and disabled.
-  # 10-100% = blower runs off the leisure battery/IBT-2 at that PWM duty.
+  #        vehicle's own switch works normally, MD30C fully disconnected
+  #        from the motor and its PWM held at 0%.
+  # 10-100% = blower runs off the leisure battery/MD30C at that PWM duty.
   #
   # Note: implemented as `number` rather than the `fan:` domain on purpose
   # - ESPHome's current template fan component is trigger-/publish-state-
@@ -212,7 +179,7 @@ number:
   # turn_on and set_speed (esphome/esphome#10844). For a safety-relevant
   # switch-over we want to own the exact sequence ourselves - `number`
   # with `set_action` delivers that reliably and has been stable for
-  # years, same pattern as the select it replaces.
+  # years.
   - platform: template
     name: "HVAC Fan (Battery)"
     id: hvac_fan_number
@@ -229,21 +196,22 @@ number:
       - lambda: |-
           int percent = (int) x;
           if (percent <= 0) {
-            id(ibt2_disengage).execute();
+            id(motor_disengage).execute();
           } else if (!id(battery_mode_allowed)) {
             ESP_LOGW("hvac", "Battery mode not armed (ignition on or after-run timer still running)");
             id(hvac_fan_number).publish_state(0);
           } else {
-            id(ibt2_engage).execute(percent);
+            id(motor_engage).execute(percent);
           }
 
 button:
-  # Commissioning helper: a short low-speed test pulse per IBT-2 channel,
-  # to find out which channel (R or L) spins the blower in the correct
-  # (factory) direction. Set ibt2_use_channel_l above afterwards and remove
-  # these buttons if you no longer need them.
+  # Commissioning helper: a short low-speed test pulse to verify the wiring
+  # (relays + MD30C) actually spins the blower before relying on the main
+  # slider. If the motor spins the wrong direction, swap the two motor
+  # leads at the MD30C's M+/M- terminals rather than changing anything
+  # here - see the DIR comment on pwm_motor above.
   - platform: template
-    name: "IBT-2 Test: Channel R (3s, 25%)"
+    name: "Motor Test (3s, 25%)"
     entity_category: config
     on_press:
       - if:
@@ -251,24 +219,8 @@ button:
             lambda: "return id(battery_mode_allowed);"
           then:
             - switch.turn_on: fan_source_battery
-            - switch.turn_on: ibt2_r_en
-            - output.set_level: { id: pwm_rpwm, level: 25% }
+            - output.set_level: { id: pwm_motor, level: 25% }
             - delay: 3s
-            - script.execute: ibt2_disengage
-          else:
-            - logger.log: "Test blocked: ignition on or after-run timer still running"
-  - platform: template
-    name: "IBT-2 Test: Channel L (3s, 25%)"
-    entity_category: config
-    on_press:
-      - if:
-          condition:
-            lambda: "return id(battery_mode_allowed);"
-          then:
-            - switch.turn_on: fan_source_battery
-            - switch.turn_on: ibt2_l_en
-            - output.set_level: { id: pwm_lpwm, level: 25% }
-            - delay: 3s
-            - script.execute: ibt2_disengage
+            - script.execute: motor_disengage
           else:
             - logger.log: "Test blocked: ignition on or after-run timer still running"

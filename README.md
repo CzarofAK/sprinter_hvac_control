@@ -4,10 +4,22 @@ Runs the Sprinter's original HVAC blower off the leisure/house battery
 instead of the vehicle's own controller. Also adds an ESPHome web server
 and native HomeAssistant integration.
 
-Uses an IBT-2 PWM driver (BTS7960) plus an `ESP32_Relay_30A_X2_V1.1` board.
-The ESP32 board controls both the relays and the IBT-2 itself - control is
-therefore centralized in one place, and the OEM controller and the IBT-2
-can never interfere with each other.
+Uses a Cytron MD30C PWM motor driver plus an `ESP32_Relay_30A_X2_V1.1`
+board. The ESP32 board controls both the relays and the MD30C itself -
+control is therefore centralized in one place, and the OEM controller and
+the MD30C can never interfere with each other.
+
+> **Hardware history:** this started out built around a generic IBT-2
+> (BTS7960) H-bridge driver. That specific unit turned out to be dead on
+> arrival (correct 3.3V logic signals measured at every input pin, but
+> essentially no power reaching the motor output even unloaded) - a
+> documented, apparently common failure mode for these cheap clone
+> boards. Since the blower never needs to reverse anyway (fan blades only
+> do anything useful in one direction), a full H-bridge was overkill to
+> begin with; the MD30C is a simpler, single-direction-friendly,
+> better-documented part sized to the blower's actual current draw. If
+> you're starting fresh, there's no reason to go through the IBT-2 at
+> all - go straight to the MD30C wiring below.
 
 ## How it works
 
@@ -29,19 +41,18 @@ like 42% from a phone touchscreen.
 
 - **0% (default/fail-safe):** both relays de-energized → the OEM
   controller is connected to the blower and works exactly as from the
-  factory. The IBT-2 is fully disconnected from the motor and disabled in
-  software (`R_EN`/`L_EN` low). This is also the state whenever the ESP32
-  has no power, has crashed, or is still booting.
-- **10-100%:** relays switch the motor leads over to the IBT-2, the active
-  channel (`R_EN`+`RPWM` or `L_EN`+`LPWM`, see below) is armed, and the
+  factory. The MD30C's PWM input is held at 0% (no power to the motor).
+  This is also the state whenever the ESP32 has no power, has crashed, or
+  is still booting.
+- **10-100%:** relays switch the motor leads over to the MD30C, and the
   selected percentage is driven via PWM duty cycle.
 
-The switch-over sequence always keeps the PWM signal and H-bridge enable
-inactive while the relays are actually switching, and never leaves the
-relays on battery without the IBT-2 actually being armed afterwards - and
-the reverse on the way back: PWM/enable off first, then the relays return
-to OEM. See `script.ibt2_engage`/`script.ibt2_disengage` in
-`relay-2ch-hvac.yaml` for the exact sequence.
+The switch-over sequence always keeps the PWM signal at 0% while the
+relays are actually switching, and never leaves the relays on battery
+without the PWM signal being set afterwards - and the reverse on the way
+back: PWM to 0% first, then the relays return to OEM. See
+`script.motor_engage`/`script.motor_disengage` in `relay-2ch-hvac.yaml`
+for the exact sequence.
 
 ### Ignition/D+ interlock
 
@@ -106,9 +117,9 @@ boot-strapping concerns) and is only ever read digitally here.
 
 Before installing anything in the van, this is tested on a separate,
 used blower + OEM controller assembly - not on the part actually fitted to
-the vehicle. Relay wiring, IBT-2 channel selection (see the test buttons
-below), and the D+ interlock can all be exercised safely on the bench
-before anything is connected in the vehicle.
+the vehicle. Relay wiring, the motor driver, and the D+ interlock can all
+be exercised safely on the bench (see the "Motor Test" commissioning
+button) before anything is connected in the vehicle.
 
 ## Power supply
 
@@ -116,8 +127,8 @@ The 3-pin "7-28V GND 5V" terminal block on the relay board takes the input
 voltage (here: 12V) and, via an onboard buck regulator, outputs regulated
 5V from the same terminal block. That 5V rail powers the ESP32 module and
 both relay coils (~70-90mA each) and should have comfortable headroom left
-for the IBT-2's **logic supply** (`VCC`) too - its opto-isolators/driver IC
-on the 5V logic side only draw a few mA, not a meaningful extra load.
+for the MD30C's **logic supply** too - its control circuitry on the 5V
+logic side only draws a few mA, not a meaningful extra load.
 
 > **Honesty check on the regulator identification:** I read the silkscreen
 > off a slightly blurry photo ("...2596S" next to a 33µH inductor) and
@@ -127,12 +138,12 @@ on the 5V logic side only draw a few mA, not a meaningful extra load.
 > from the visual topology (TO-263 regulator + inductor + electrolytic caps
 > = standard non-isolated buck converter), **not** a verified fact. Please
 > measure the 5V terminal with a multimeter under load (relays energized +
-> IBT-2 logic connected) before relying on it, rather than trusting this
+> MD30C logic connected) before relying on it, rather than trusting this
 > identification.
 
-Important: this only covers the IBT-2's **logic** supply. The actual motor
+Important: this only covers the MD30C's **logic** supply. The actual motor
 current (`B+`/`B-`/`M+`/`M-`) does **not** run through this regulator at
-all - it goes straight from the leisure battery to the IBT-2 and from there
+all - it goes straight from the leisure battery to the MD30C and from there
 to the motor (see below) - that would be far too much current for the
 small onboard regulator.
 
@@ -141,58 +152,66 @@ small onboard regulator.
 - **ESP32_Relay_30A_X2_V1.1** (photos in `information/`): ESP32-32E module,
   2x Songle SLA-05VDC-SL-C changeover relays (30A/240VAC resp. 30A/28VDC),
   7-28V input with a buck regulator down to 5V.
-- **IBT-2 / BTS7960** motor driver, powered from the leisure battery.
+- **Cytron MD30C** motor driver (5-30V, 30A continuous/80A peak, PWM+DIR
+  logic interface, 3.3V/5V-compatible), powered from the leisure battery.
+  Sized against the blower's expected draw (OEM fuse in that circuit is
+  typically 20-30A) with real headroom, unlike the 20A MD20A or the
+  20A-continuous-despite-"30A"-branding generic MOSFET modules also
+  considered - check the MD30C's onboard mode switch/jumper is set to
+  accept **external** PWM+DIR rather than its own onboard
+  potentiometer/switches.
 
 ### ESP32_Relay_30A_X2_V1.1 pinout
 
 All GPIOs below are broken out on JP1/JP2 per the bottom silkscreen
 (`information/*_Bottom.jpg`) and aren't used by any other onboard consumer.
 
-| Signal                      | GPIO | Function |
-|------------------------------|------|----------|
-| Onboard LED                   | G5   | relay board status LED |
-| Relay 1                        | G12  | switches one blower motor lead |
-| Relay 2                        | G13  | switches the other blower motor lead |
-| IBT-2 `RPWM` (channel R)       | G4   | channel R PWM speed signal (20 kHz) |
-| IBT-2 `R_EN` (channel R)       | G16  | channel R software interlock |
-| IBT-2 `LPWM` (channel L)       | G17  | channel L PWM speed signal (20 kHz) |
-| IBT-2 `L_EN` (channel L)       | G18  | channel L software interlock |
-| Ignition/D+ sense               | G34  | detects ignition/engine on (see optocoupler above) |
+| Signal              | GPIO | Function |
+|----------------------|------|----------|
+| Onboard LED            | G5   | relay board status LED |
+| Relay 1                 | G12  | switches one blower motor lead |
+| Relay 2                 | G13  | switches the other blower motor lead |
+| MD30C `PWM`             | G4   | motor speed signal (20 kHz) |
+| Ignition/D+ sense        | G34  | detects ignition/engine on (see optocoupler above) |
 
-Right now **both** IBT-2 channels (R and L) are software-switchable,
-because it isn't known yet which one spins the blower in the correct
-(factory) direction. Use the two commissioning buttons in ESPHome/HA
-(`IBT-2 Test: Channel R/L`, a 3s test pulse at 25%) to find out which
-channel is correct, then set `ibt2_use_channel_l`'s `initial_value` in
-`relay-2ch-hvac.yaml` accordingly (`false` = channel R, `true` = channel
-L). After that, the unused channel (`L_EN`/`LPWM` resp. `R_EN`/`RPWM`) can
-optionally be hardwired in hardware and removed from the config - the
-unused channel's `*_EN` tied fixed to 5V, its `*PWM` tied fixed to GND.
+GPIO16/17/18 (used by the earlier IBT-2 revision for its second channel
+and enable pins) are free/unused now - the MD30C only needs one PWM
+signal.
 
-### IBT-2 wiring
+### MD30C wiring
 
-- `RPWM` → GPIO4, `R_EN` → GPIO16 (ESP32 board, channel R)
-- `LPWM` → GPIO17, `L_EN` → GPIO18 (ESP32 board, channel L)
-  (both channels software-switched for now, see above - optionally
-  hardwire the unused one later once the correct direction is known)
-- `VCC` (logic) → 5V, `GND` → common ground with the ESP32 board
-- `B+`/`B-` → leisure battery (fused!)
+- `PWM` → GPIO4 (ESP32 board)
+- `DIR` → hardwired directly to `GND` on the MD30C itself, **not** to a
+  GPIO. The blower only ever needs one direction, so there's nothing to
+  switch at runtime; if it spins the wrong way once wired up, swap the two
+  motor leads at `M+`/`M-` instead of touching `DIR` or the config -
+  electrically identical, no reflash needed. (If your MD30C variant needs
+  `DIR` pulled to 3.3V/5V instead of GND for the correct direction, wire it
+  there instead - either fixed level works, only the polarity differs.)
+- `VCC`/`5V` (logic) → 5V, `GND` → common ground with the ESP32 board
+- `VIN`/`B+`/`B-` (motor power, exact naming varies) → leisure battery
+  (fused!)
 - `M+`/`M-` → to the changeover (NO) contacts of Relay 1/2
+
+Confirm the exact terminal labels against the MD30C you receive - the
+naming above is generic pending the physical board (photos will help
+narrow it down once it arrives, same as we did for the IBT-2's `information/`
+photos above).
 
 ### Relay wiring (per relay)
 
 - **COM** → motor lead to the blower
 - **NC** (de-energized) → OEM Sprinter controller
-- **NO** (energized) → IBT-2 `M+`/`M-`
+- **NO** (energized) → MD30C `M+`/`M-`
 
 Both relays **always** switch both motor leads together (see
 `fan_source_battery` in `relay-2ch-hvac.yaml`), so the OEM controller and
-the IBT-2 can never both be connected to either lead at the same time.
+the MD30C can never both be connected to either lead at the same time.
 
 ## ESPHome configuration
 
-- `relay-2ch-hvac.yaml` - board-specific config (relays, IBT-2, fan control
-  entity)
+- `relay-2ch-hvac.yaml` - board-specific config (relays, motor driver, fan
+  control entity)
 - `.basics.yaml` - shared base config (WiFi, API, OTA, web server,
   watchdog); pulled in via `packages:`
 - `secrets.yaml.example` - template for `secrets.yaml` (WiFi credentials,
