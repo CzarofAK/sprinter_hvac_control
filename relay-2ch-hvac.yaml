@@ -69,7 +69,7 @@ binary_sensor:
   # 10kΩ pull-up on the collector (see README) is mandatory, otherwise the
   # pin floats.
   - platform: gpio
-    name: "Ignition / D+ Active"
+    name: "Ignition (D+) Active"
     id: ignition_active
     pin:
       number: 34
@@ -78,7 +78,7 @@ binary_sensor:
     filters:
       - delayed_on: 200ms
       - delayed_off: 200ms
-    publish_initial_state: true
+    trigger_on_initial_state: true
     on_press:
       # Ignition comes on (or the engine starts) -> IMMEDIATELY back to the
       # OEM controller, no waiting, no exception.
