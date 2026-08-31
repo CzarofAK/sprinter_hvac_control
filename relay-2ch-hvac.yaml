@@ -30,7 +30,7 @@ globals:
 
   # Battery mode is only allowed while ignition/D+ is off AND the after-run
   # timer has elapsed. See binary_sensor.ignition_active and
-  # script.ignition_off_delay below.
+  # script.ignition_off_delay_script below.
   - id: battery_mode_allowed
     type: bool
     restore_value: false
@@ -82,7 +82,7 @@ binary_sensor:
     on_press:
       # Ignition comes on (or the engine starts) -> IMMEDIATELY back to the
       # OEM controller, no waiting, no exception.
-      - script.stop: ignition_off_delay
+      - script.stop: ignition_off_delay_script
       - globals.set:
           id: battery_mode_allowed
           value: "false"
@@ -94,7 +94,7 @@ binary_sensor:
       # Ignition goes off -> start the after-run timer; only once it
       # elapses is battery mode re-armed (the OEM blower may still run on
       # briefly).
-      - script.execute: ignition_off_delay
+      - script.execute: ignition_off_delay_script
 
 switch:
   # Both relays sit on the blower's motor leads (see README/wiring). They
@@ -188,7 +188,7 @@ script:
   # After-run timer following ignition OFF. mode: restart -> every
   # ignition on_release resets the timer; script.stop (on ignition ON)
   # cancels it immediately.
-  - id: ignition_off_delay
+  - id: ignition_off_delay_script
     mode: restart
     then:
       - delay: ${ignition_off_delay}
