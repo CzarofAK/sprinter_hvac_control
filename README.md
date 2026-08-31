@@ -12,25 +12,29 @@ can never interfere with each other.
 ## How it works
 
 There is exactly one user-facing entity in HomeAssistant/the web UI:
-**"HVAC Fan (Battery)"** - a dropdown (`select`) with the options `Off` /
-`Low` / `Medium` / `High`.
+**"HVAC Fan (Battery)"** - a 0-100% slider (`number`) in steps of 10, so it
+only ever lands on round numbers (0/10/20/.../100), not something fiddly
+like 42% from a phone touchscreen.
 
-> Implemented as a `select` rather than ESPHome's `fan:` domain on purpose:
+> Implemented as a `number` rather than ESPHome's `fan:` domain on purpose:
 > the current template fan component is trigger-/publish-state-based
 > (state is set optimistically, *then* `on_turn_on`/`on_speed_set` fire)
 > and has known ordering issues between turning on and setting speed. For a
 > safety-relevant switch-over we want to own the exact sequence ourselves -
-> `select` with `set_action` is the more robust, long-stable choice for
-> that. From HA's point of view it feels the same: one control.
+> `number` with `set_action` is the more robust, long-stable choice for
+> that (an earlier revision used `select` with fixed Low/Medium/High
+> options for the same reason - functionally identical, `number` just adds
+> continuous PWM resolution instead of 3 fixed steps). From HA's point of
+> view it's one control either way.
 
-- **Off (default/fail-safe):** both relays de-energized → the OEM
+- **0% (default/fail-safe):** both relays de-energized → the OEM
   controller is connected to the blower and works exactly as from the
   factory. The IBT-2 is fully disconnected from the motor and disabled in
   software (`R_EN`/`L_EN` low). This is also the state whenever the ESP32
   has no power, has crashed, or is still booting.
-- **Low/Medium/High:** relays switch the motor leads over to the IBT-2, the
-  active channel (`R_EN`+`RPWM` or `L_EN`+`LPWM`, see below) is armed, and
-  the selected level is driven via PWM.
+- **10-100%:** relays switch the motor leads over to the IBT-2, the active
+  channel (`R_EN`+`RPWM` or `L_EN`+`LPWM`, see below) is armed, and the
+  selected percentage is driven via PWM duty cycle.
 
 The switch-over sequence always keeps the PWM signal and H-bridge enable
 inactive while the relays are actually switching, and never leaves the
@@ -47,7 +51,7 @@ whichever is easiest to tap on the vehicle):
 
 - **Ignition/engine on → immediately back to the OEM controller.** As soon
   as the D+ signal goes active, the software instantly switches back to
-  `Off` (`binary_sensor.ignition_active`, `on_press`) - regardless of
+  0% (`binary_sensor.ignition_active`, `on_press`) - regardless of
   whatever was selected in HA. No waiting, no exception.
 - **Ignition/engine off → after-run timer, only then re-armed.** The OEM
   blower controller may keep running briefly after shutdown. Only
