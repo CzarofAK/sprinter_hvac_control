@@ -1,0 +1,55 @@
+ota:
+  - platform: esphome
+    id: ota_esphome
+    password: !secret password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  output_power: 17dB
+  reboot_timeout: 0s
+  on_connect:
+    - logger.log: "WiFi CONNECTED"
+  on_disconnect:
+    - logger.log: "WiFi DISCONNECTED"
+  ap:
+    ssid: ${name}
+    password: !secret fallback_password
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
+
+web_server:
+  port: 80
+  version: 3
+  local: true
+
+logger:
+  level: DEBUG
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+button:
+  - platform: restart
+    name: "Restart"
+    id: restart_button
+
+interval:
+  - interval: 1min
+    startup_delay: 5min
+    then:
+      - if:
+          condition:
+            and:
+              - not:
+                  wifi.connected:
+              - not:
+                  wifi.ap_active:
+          then:
+            - logger.log: "Weder WLAN noch Fallback-AP - Neustart"
+            - button.press: restart_button

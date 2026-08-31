@@ -9,12 +9,21 @@ esphome:
   friendly_name: ${name}
 
 esp32:
+  board: esp32dev
   variant: esp32
 
 output:
   - platform: gpio
     id: output_led
     pin: 5
+
+  # RPWM des IBT-2: Drehzahlsignal fürs Gebläse. 20kHz = außerhalb des
+  # hörbaren Bereichs, kein Motor-Fiepen. Wird ausschließlich über die
+  # "HVAC Fan (Battery)"-Entity gesetzt, nie direkt.
+  - platform: ledc
+    id: pwm_rpwm
+    pin: 4
+    frequency: 20000Hz
 
 light:
   - platform: binary
@@ -23,11 +32,81 @@ light:
     output: output_led
 
 switch:
+  # Beide Relais liegen an den Motorleitungen des Gebläses (siehe README/Wiring).
+  # Sie werden NIE einzeln angesteuert, sondern immer gemeinsam über die
+  # "Fan Power Source"-Logik weiter unten geschaltet - deshalb `internal: true`,
+  # damit in HA/Web-UI nur ein einziger, konsistenter Schalter auftaucht.
+  # restore_mode ALWAYS_OFF = nach Boot/Stromausfall immer zurück auf den
+  # unbestromten Ruhezustand der Relais = Original-Controller (Fail-Safe).
   - platform: gpio
-    name: Relay 1
     id: relay_1
     pin: 12
+    internal: true
+    restore_mode: ALWAYS_OFF
   - platform: gpio
-    name: Relay 2
     id: relay_2
     pin: 13
+    internal: true
+    restore_mode: ALWAYS_OFF
+
+  # Gemeinsamer interner Schalter für die Stromquelle des Gebläses.
+  # OFF (Default/Fail-Safe) = Original-Sprinter-Controller
+  # ON                      = Aufbaubatterie über IBT-2
+  # Wird ausschließlich von der "HVAC Fan (Battery)"-Fan-Entity unten
+  # gesteuert - deshalb ebenfalls internal, kein eigenes UI-Element.
+  - platform: template
+    id: fan_source_battery
+    internal: true
+    optimistic: false
+    lambda: |-
+      return id(relay_1).state && id(relay_2).state;
+    turn_on_action:
+      - switch.turn_on: relay_1
+      - switch.turn_on: relay_2
+    turn_off_action:
+      - switch.turn_off: relay_1
+      - switch.turn_off: relay_2
+
+  # R_EN des IBT-2: zusätzlicher Software-Interlock. Die H-Brücke wird erst
+  # scharf geschaltet, NACHDEM die Relais auf Batteriebetrieb umgelegt haben,
+  # und wird VOR dem Zurückschalten auf den Original-Controller wieder
+  # deaktiviert. L_EN liegt fest auf 5V, LPWM fest auf GND (siehe README) -
+  # wir nutzen den IBT-2 nur einkanalig/einseitig, da das Gebläse nicht
+  # reversiert werden muss.
+  - platform: gpio
+    id: ibt2_r_en
+    pin: 16
+    internal: true
+    restore_mode: ALWAYS_OFF
+
+fan:
+  # Einziges Bedienelement in HA/Web-UI für das ganze System.
+  # OFF = Original-Sprinter-Controller aktiv, Fahrzeugschalter funktioniert
+  #       normal weiter, IBT-2 komplett vom Motor getrennt und deaktiviert.
+  # ON  = Gebläse läuft über Aufbaubatterie/IBT-2 mit gewählter Stufe.
+  #
+  # Reihenfolge ist sicherheitsrelevant:
+  #   Einschalten: PWM auf 0% -> Relais auf Batterie -> R_EN scharf -> Stufe setzen
+  #   Ausschalten: PWM auf 0% -> R_EN aus -> Relais zurück auf Original
+  # So liegt RPWM nie an, während die Relais noch umschalten, und R_EN ist
+  # nie aktiv, während der Original-Controller am Motor hängt.
+  - platform: template
+    name: "HVAC Fan (Battery)"
+    id: hvac_fan
+    speed_count: 3
+    turn_on_action:
+      - output.set_level:
+          id: pwm_rpwm
+          level: 0%
+      - switch.turn_on: fan_source_battery
+      - switch.turn_on: ibt2_r_en
+    turn_off_action:
+      - output.set_level:
+          id: pwm_rpwm
+          level: 0%
+      - switch.turn_off: ibt2_r_en
+      - switch.turn_off: fan_source_battery
+    set_speed_action:
+      - output.set_level:
+          id: pwm_rpwm
+          level: !lambda "return x / 3.0;"
