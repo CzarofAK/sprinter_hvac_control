@@ -73,45 +73,55 @@ whichever is easiest to tap on the vehicle):
 
 **D+ sense input (GPIO34):** D+ sits at vehicle voltage (12-14V+, possibly
 higher spikes while charging) - that must **never** go directly into an
-ESP32 GPIO (max. 3.3V). Implemented through a **PC817C** optocoupler
-(galvanically isolated, no direct electrical reference needed between the
-vehicle electrics and the ESP32 logic):
+ESP32 GPIO (max. 3.3V). Implemented through a 2-channel, EL817-based opto
+isolation module (galvanically isolated, no direct electrical reference
+needed between the vehicle electrics and the ESP32 logic). Per channel it
+has 5 pins - `IVCC` / `SIN1` / `VO` / `OUT1` / `OGND` - with the LED-side
+series resistor (`R1`, 470Ω) and the output-side pull-up (`R2`, 10kΩ)
+already built onto the module, so no discrete parts needed:
 
-- **LED side** (pin 1 anode / pin 2 cathode): D+ → series resistor → pin 1,
-  pin 2 → vehicle/chassis ground.
-  Size the series resistor so LED current stays around ~10mA: at 13-15V
-  system voltage, roughly **1.2kΩ, 1/2W** (`R = (V_D+ - 1.2V) / 0.01A`).
-- **Transistor side** (pin 4 collector / pin 3 emitter): pin 3 → ESP32 GND,
-  pin 4 → **10kΩ pull-up to 3.3V** AND → GPIO34. GPIO34 is an input-only
-  pin with no internal pull-up, so this external pull-up is **mandatory** -
-  without it the pin floats.
-- This makes the pin logic active-low (the optocoupler pulls the collector
-  toward GND while D+ is present) - already compensated in the YAML config
-  via `inverted: true`, so `binary_sensor.ignition_active` still reports
-  "on" when D+ is actually active.
+- `IVCC` → D+, directly, no external resistor - `R1` (470Ω) is already on
+  the module. LED current at typical automotive voltages:
+  `(V_D+ - 1.2V) / 470Ω` ≈ 25mA at 13V, ≈ 29mA at 15V - comfortably under
+  the module's 50mA max LED current rating.
+- `SIN1` → vehicle/chassis ground.
+- `VO` → GPIO16 (`switch.opto_vcc` in `relay-2ch-hvac.yaml`, held
+  permanently high in software as a stand-in 3.3V source - see "Powering
+  the opto module's VO" below). Load here is only
+  `3.3V / 10kΩ` ≈ 0.33mA through the module's onboard `R2` - unrelated to
+  the 50mA LED-side rating, and trivial for a GPIO.
+- `OUT1` → GPIO34. No external pull-up needed - the module's onboard `R2`
+  already does that job once `VO` is powered.
+- `OGND` → common ground with the ESP32 board.
 
-> **Ready-made module instead of discrete parts:** a cheap off-the-shelf
-> "2-channel PC817 optocoupler isolation module" (like the one you linked)
-> already integrates exactly this circuit - the LED-side series resistor
-> and (usually) the output-side pull-up, on a small screw-terminal board
-> with `VCC` / `GND` / `IN` / `OUT` per channel. If you use one of those
-> instead of a bare PC817C: `IN`/`GND` on that channel → D+ / vehicle
-> ground, `VCC` → ESP32 3.3V, `OUT` → GPIO34. Two things you should verify
-> on your specific module before wiring it to D+ (I couldn't fetch the
-> Amazon listing from this environment to confirm them myself):
-> 1. its onboard LED resistor is actually sized for a 12-14V input and not
->    only for 3.3-5V logic-to-logic isolation (most modules sold as
->    "isolation module" for microcontrollers are fine with automotive 12V
->    sensing - that's their most common use case - but check the listing);
-> 2. whether its `OUT` is active-high or active-low with `VCC` tied to
->    3.3V - if it comes out active-high instead of the active-low behavior
->    assumed above, drop `inverted: true` from `binary_sensor.ignition_active`
->    in `relay-2ch-hvac.yaml`. Easiest way to be sure: apply 12V to `IN`
->    and measure `OUT` with a multimeter once before trusting it in the
->    interlock logic.
+This makes the pin logic active-low (`R2` holds `OUT1` high at rest; the
+phototransistor pulls it toward `OGND` while D+ is present) - already
+compensated in the YAML config via `inverted: true`, so
+`binary_sensor.ignition_active` still reports "on" when D+ is actually
+active.
 
 GPIO34 was chosen deliberately because it's a pure input pin (no
 boot-strapping concerns) and is only ever read digitally here.
+
+### Powering the opto module's VO
+
+Neither the ESP32_Relay_30A_X2_V1.1 nor the MD30C breaks out a spare
+3.3V pin, so `VO` is powered from **GPIO16 held permanently high**
+(`switch.opto_vcc`, `restore_mode: ALWAYS_ON`) instead of a dedicated
+3.3V rail. This works cleanly here because the load is tiny (≈0.33mA,
+see above) - nowhere near a GPIO's ~20mA safe continuous rating - but two
+things are worth knowing:
+
+- A GPIO used this way has no current-limiting/short-circuit protection
+  of its own, unlike a proper regulated rail. Fine for a clean,
+  low-current load like this; not something to reuse for anything with
+  real current draw.
+- `restore_mode: ALWAYS_ON` (the opposite of the fail-safe `ALWAYS_OFF`
+  used elsewhere in this config) - it just needs to stay high
+  permanently. If it's briefly undefined for a moment during boot before
+  ESPHome takes over the pin, the worst case is a momentarily-wrong D+
+  reading, which only pushes `battery_mode_allowed` toward staying
+  `false` longer - the safe direction, not the dangerous one.
 
 ## Bench test setup
 
@@ -174,11 +184,12 @@ All GPIOs below are broken out on JP1/JP2 per the bottom silkscreen
 | Relay 1                 | G12  | switches one blower motor lead |
 | Relay 2                 | G13  | switches the other blower motor lead |
 | MD30C `PWM`             | G4   | motor speed signal (20 kHz) |
+| Opto module `VO`         | G16  | stand-in 3.3V source, held ALWAYS_ON (see "Powering the opto module's VO" above) |
 | Ignition/D+ sense        | G34  | detects ignition/engine on (see optocoupler above) |
 
-GPIO16/17/18 (used by the earlier IBT-2 revision for its second channel
-and enable pins) are free/unused now - the MD30C only needs one PWM
-signal from the ESP32.
+GPIO17/18 (used by the earlier IBT-2 revision for its second channel and
+enable pin) are free/unused now - the MD30C only needs one PWM signal
+from the ESP32, and GPIO16 has been repurposed for the opto module.
 
 ### MD30C wiring
 

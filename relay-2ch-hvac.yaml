@@ -61,13 +61,14 @@ light:
 
 binary_sensor:
   # Vehicle ignition/running signal (D+ from the alternator, or terminal
-  # 15 - whichever is available), galvanically isolated via a PC817C
-  # optocoupler down to the ESP32's 3.3V logic level - see README,
-  # "D+ sense input". `inverted: true` because the optocoupler output is
-  # active-low (collector gets pulled toward GND while D+ is present).
-  # GPIO34 is an input-only pin with NO internal pull-up - the external
-  # 10kΩ pull-up on the collector (see README) is mandatory, otherwise the
-  # pin floats.
+  # 15 - whichever is available), galvanically isolated via a 2-channel
+  # EL817-based opto isolation module down to the ESP32's 3.3V logic
+  # level - see README, "D+ sense input", for the exact module wiring
+  # (IVCC/SIN1/VO/OUT1/OGND). `inverted: true` because the module's
+  # output is active-low (its onboard pull-up resistor holds OUT1 high;
+  # the phototransistor pulls it low while D+ is present). No external
+  # pull-up needed on GPIO34 - the module's own onboard R2 (10kΩ, VO to
+  # OUT1) does that job, powered by switch.opto_vcc below.
   - platform: gpio
     name: "Ignition (D+) Active"
     id: ignition_active
@@ -113,6 +114,20 @@ switch:
     pin: 13
     internal: true
     restore_mode: ALWAYS_OFF
+
+  # Powers the D+ opto isolation module's VO (output-side pull-up supply)
+  # straight from a GPIO instead of a dedicated 3.3V rail - this board
+  # doesn't break one out. Load is tiny (module's onboard 10kΩ pull-up:
+  # 3.3V/10kΩ ≈ 0.33mA), nowhere near a GPIO's ~20mA safe continuous
+  # rating. restore_mode ALWAYS_ON (opposite of the fail-safe switches
+  # above) since this just needs to stay high permanently - GPIO16 was
+  # picked because we already know its exact physical header position
+  # from the earlier IBT-2 commissioning (freed up by the MD30C switch).
+  - platform: gpio
+    id: opto_vcc
+    pin: 16
+    internal: true
+    restore_mode: ALWAYS_ON
 
   # Shared internal switch for the blower's power source.
   # OFF (default/fail-safe) = OEM Sprinter controller
