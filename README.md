@@ -4,10 +4,22 @@ Runs the Sprinter's original HVAC blower off the leisure/house battery
 instead of the vehicle's own controller. Also adds an ESPHome web server
 and native HomeAssistant integration.
 
-Uses an IBT-2 PWM driver (BTS7960) plus an `ESP32_Relay_30A_X2_V1.1` board.
-The ESP32 board controls both the relays and the IBT-2 itself - control is
-therefore centralized in one place, and the OEM controller and the IBT-2
-can never interfere with each other.
+Uses a Cytron MD30C PWM motor driver plus an `ESP32_Relay_30A_X2_V1.1`
+board. The ESP32 board controls both the relays and the MD30C itself -
+control is therefore centralized in one place, and the OEM controller and
+the MD30C can never interfere with each other.
+
+> **Hardware history:** this started out built around a generic IBT-2
+> (BTS7960) H-bridge driver. That specific unit turned out to be dead on
+> arrival (correct 3.3V logic signals measured at every input pin, but
+> essentially no power reaching the motor output even unloaded) - a
+> documented, apparently common failure mode for these cheap clone
+> boards. Since the blower never needs to reverse anyway (fan blades only
+> do anything useful in one direction), a full H-bridge was overkill to
+> begin with; the MD30C is a simpler, single-direction-friendly,
+> better-documented part sized to the blower's actual current draw. If
+> you're starting fresh, there's no reason to go through the IBT-2 at
+> all - go straight to the MD30C wiring below.
 
 ## How it works
 
@@ -29,19 +41,18 @@ like 42% from a phone touchscreen.
 
 - **0% (default/fail-safe):** both relays de-energized → the OEM
   controller is connected to the blower and works exactly as from the
-  factory. The IBT-2 is fully disconnected from the motor and disabled in
-  software (`R_EN`/`L_EN` low). This is also the state whenever the ESP32
-  has no power, has crashed, or is still booting.
-- **10-100%:** relays switch the motor leads over to the IBT-2, the active
-  channel (`R_EN`+`RPWM` or `L_EN`+`LPWM`, see below) is armed, and the
+  factory. The MD30C's PWM input is held at 0% (no power to the motor).
+  This is also the state whenever the ESP32 has no power, has crashed, or
+  is still booting.
+- **10-100%:** relays switch the motor leads over to the MD30C, and the
   selected percentage is driven via PWM duty cycle.
 
-The switch-over sequence always keeps the PWM signal and H-bridge enable
-inactive while the relays are actually switching, and never leaves the
-relays on battery without the IBT-2 actually being armed afterwards - and
-the reverse on the way back: PWM/enable off first, then the relays return
-to OEM. See `script.ibt2_engage`/`script.ibt2_disengage` in
-`relay-2ch-hvac.yaml` for the exact sequence.
+The switch-over sequence always keeps the PWM signal at 0% while the
+relays are actually switching, and never leaves the relays on battery
+without the PWM signal being set afterwards - and the reverse on the way
+back: PWM to 0% first, then the relays return to OEM. See
+`script.motor_engage`/`script.motor_disengage` in `relay-2ch-hvac.yaml`
+for the exact sequence.
 
 ### Ignition/D+ interlock
 
@@ -60,64 +71,78 @@ whichever is easiest to tap on the vehicle):
   re-arm battery mode (`battery_mode_allowed`). A selection attempt before
   that is rejected and logged.
 
-**D+ sense input (GPIO34):** D+ sits at vehicle voltage (12-14V+, possibly
+**D+ sense input (GPIO25):** D+ sits at vehicle voltage (12-14V+, possibly
 higher spikes while charging) - that must **never** go directly into an
-ESP32 GPIO (max. 3.3V). Implemented through a **PC817C** optocoupler
-(galvanically isolated, no direct electrical reference needed between the
-vehicle electrics and the ESP32 logic):
+ESP32 GPIO (max. 3.3V). Implemented through a 2-channel, EL817-based opto
+isolation module (galvanically isolated, no direct electrical reference
+needed between the vehicle electrics and the ESP32 logic). Per channel it
+has 5 pins - `IVCC` / `SIN1` / `VO` / `OUT1` / `OGND` - with the LED-side
+series resistor (`R1`, 470Ω) and the output-side pull-up (`R2`, 10kΩ)
+already built onto the module, so no discrete parts needed:
 
-- **LED side** (pin 1 anode / pin 2 cathode): D+ → series resistor → pin 1,
-  pin 2 → vehicle/chassis ground.
-  Size the series resistor so LED current stays around ~10mA: at 13-15V
-  system voltage, roughly **1.2kΩ, 1/2W** (`R = (V_D+ - 1.2V) / 0.01A`).
-- **Transistor side** (pin 4 collector / pin 3 emitter): pin 3 → ESP32 GND,
-  pin 4 → **10kΩ pull-up to 3.3V** AND → GPIO34. GPIO34 is an input-only
-  pin with no internal pull-up, so this external pull-up is **mandatory** -
-  without it the pin floats.
-- This makes the pin logic active-low (the optocoupler pulls the collector
-  toward GND while D+ is present) - already compensated in the YAML config
-  via `inverted: true`, so `binary_sensor.ignition_active` still reports
-  "on" when D+ is actually active.
+- `IVCC` → D+, directly, no external resistor - `R1` (470Ω) is already on
+  the module. LED current at typical automotive voltages:
+  `(V_D+ - 1.2V) / 470Ω` ≈ 25mA at 13V, ≈ 29mA at 15V - comfortably under
+  the module's 50mA max LED current rating.
+- `SIN1` → vehicle/chassis ground.
+- `VO` → GPIO27 (`switch.opto_vcc` in `relay-2ch-hvac.yaml`, held
+  permanently high in software as a stand-in 3.3V source - see "Powering
+  the opto module's VO" below). Load here is only
+  `3.3V / 10kΩ` ≈ 0.33mA through the module's onboard `R2` - unrelated to
+  the 50mA LED-side rating, and trivial for a GPIO.
+- `OUT1` → GPIO25. No external pull-up needed - the module's onboard `R2`
+  already does that job once `VO` is powered.
+- `OGND` → common ground with the ESP32 board.
 
-> **Ready-made module instead of discrete parts:** a cheap off-the-shelf
-> "2-channel PC817 optocoupler isolation module" (like the one you linked)
-> already integrates exactly this circuit - the LED-side series resistor
-> and (usually) the output-side pull-up, on a small screw-terminal board
-> with `VCC` / `GND` / `IN` / `OUT` per channel. If you use one of those
-> instead of a bare PC817C: `IN`/`GND` on that channel → D+ / vehicle
-> ground, `VCC` → ESP32 3.3V, `OUT` → GPIO34. Two things you should verify
-> on your specific module before wiring it to D+ (I couldn't fetch the
-> Amazon listing from this environment to confirm them myself):
-> 1. its onboard LED resistor is actually sized for a 12-14V input and not
->    only for 3.3-5V logic-to-logic isolation (most modules sold as
->    "isolation module" for microcontrollers are fine with automotive 12V
->    sensing - that's their most common use case - but check the listing);
-> 2. whether its `OUT` is active-high or active-low with `VCC` tied to
->    3.3V - if it comes out active-high instead of the active-low behavior
->    assumed above, drop `inverted: true` from `binary_sensor.ignition_active`
->    in `relay-2ch-hvac.yaml`. Easiest way to be sure: apply 12V to `IN`
->    and measure `OUT` with a multimeter once before trusting it in the
->    interlock logic.
+This makes the pin logic active-low (`R2` holds `OUT1` high at rest; the
+phototransistor pulls it toward `OGND` while D+ is present) - already
+compensated in the YAML config via `inverted: true`, so
+`binary_sensor.ignition_active` still reports "on" when D+ is actually
+active.
 
-GPIO34 was chosen deliberately because it's a pure input pin (no
-boot-strapping concerns) and is only ever read digitally here.
+GPIO25/GPIO27 sit on JP1's outer row (board-edge side), moved there from
+JP2 to free up space next to the MD30C signals. **Verify the physical
+position with a multimeter before soldering anything permanent** (toggle
+each from ESPHome/HA, probe the pin you think it is) rather than trusting
+the header layout derived from mirrored reference photos - that same
+reasoning got one pin wrong earlier in this project (see the RPWM/GPIO0
+mixup during IBT-2 commissioning), so it's not a one-off precaution.
+
+### Powering the opto module's VO
+
+Neither the ESP32_Relay_30A_X2_V1.1 nor the MD30C breaks out a spare
+3.3V pin, so `VO` is powered from **GPIO27 held permanently high**
+(`switch.opto_vcc`, `restore_mode: ALWAYS_ON`) instead of a dedicated
+3.3V rail. This works cleanly here because the load is tiny (≈0.33mA,
+see above) - nowhere near a GPIO's ~20mA safe continuous rating - but two
+things are worth knowing:
+
+- A GPIO used this way has no current-limiting/short-circuit protection
+  of its own, unlike a proper regulated rail. Fine for a clean,
+  low-current load like this; not something to reuse for anything with
+  real current draw.
+- `restore_mode: ALWAYS_ON` (the opposite of the fail-safe `ALWAYS_OFF`
+  used elsewhere in this config) - it just needs to stay high
+  permanently. If it's briefly undefined for a moment during boot before
+  ESPHome takes over the pin, the worst case is a momentarily-wrong D+
+  reading, which only pushes `battery_mode_allowed` toward staying
+  `false` longer - the safe direction, not the dangerous one.
 
 ## Bench test setup
 
 Before installing anything in the van, this is tested on a separate,
 used blower + OEM controller assembly - not on the part actually fitted to
-the vehicle. Relay wiring, IBT-2 channel selection (see the test buttons
-below), and the D+ interlock can all be exercised safely on the bench
-before anything is connected in the vehicle.
+the vehicle. Relay wiring, the motor driver, and the D+ interlock can all
+be exercised safely on the bench (see the "Motor Test" commissioning
+button) before anything is connected in the vehicle.
 
 ## Power supply
 
-The 3-pin "7-28V GND 5V" terminal block on the relay board takes the input
-voltage (here: 12V) and, via an onboard buck regulator, outputs regulated
-5V from the same terminal block. That 5V rail powers the ESP32 module and
-both relay coils (~70-90mA each) and should have comfortable headroom left
-for the IBT-2's **logic supply** (`VCC`) too - its opto-isolators/driver IC
-on the 5V logic side only draw a few mA, not a meaningful extra load.
+The ESP32_Relay_30A_X2_V1.1's 3-pin "7-28V GND 5V" terminal block takes
+the input voltage (here: 12V) and, via an onboard buck regulator, outputs
+regulated 5V from the same terminal block. That 5V rail powers the ESP32
+module and both relay coils (~70-90mA each) - nothing else needs to draw
+from it.
 
 > **Honesty check on the regulator identification:** I read the silkscreen
 > off a slightly blurry photo ("...2596S" next to a 33µH inductor) and
@@ -126,73 +151,111 @@ on the 5V logic side only draw a few mA, not a meaningful extra load.
 > and I could not fetch a datasheet to confirm it. That's an educated guess
 > from the visual topology (TO-263 regulator + inductor + electrolytic caps
 > = standard non-isolated buck converter), **not** a verified fact. Please
-> measure the 5V terminal with a multimeter under load (relays energized +
-> IBT-2 logic connected) before relying on it, rather than trusting this
+> measure the 5V terminal with a multimeter under load (both relays
+> energized) before relying on it, rather than trusting this
 > identification.
 
-Important: this only covers the IBT-2's **logic** supply. The actual motor
-current (`B+`/`B-`/`M+`/`M-`) does **not** run through this regulator at
-all - it goes straight from the leisure battery to the IBT-2 and from there
-to the motor (see below) - that would be far too much current for the
-small onboard regulator.
+The MD30C is **entirely separate** from that 5V rail - per its own user's
+manual (Cytron, Rev 1.4), it has no dedicated logic-supply pin at all. Its
+`POWER` terminal (5-30V, the same leisure-battery feed that also drives the
+motor stage) is regulated down to logic voltage **internally on the MD30C
+board itself**. The only thing connecting it to the ESP32 side is the 3-pin
+signal header (`GND`/`PWM`/`DIR`) - and even `DIR` on that header isn't
+used (see wiring below). So there's no headroom question to work out here
+at all, unlike the earlier IBT-2 revision.
 
 ## Hardware
 
 - **ESP32_Relay_30A_X2_V1.1** (photos in `information/`): ESP32-32E module,
   2x Songle SLA-05VDC-SL-C changeover relays (30A/240VAC resp. 30A/28VDC),
   7-28V input with a buck regulator down to 5V.
-- **IBT-2 / BTS7960** motor driver, powered from the leisure battery.
+- **Cytron MD30C** motor driver (5-30V, 30A continuous/80A peak for up to
+  1s, PWM+DIR logic interface, logic input HIGH = 3-5.5V / LOW = 0-0.5V
+  per its datasheet - ESP32's 3.3V GPIO clears the 3V HIGH threshold with
+  a bit of margin, not a lot), powered directly from the leisure battery.
+  Sized against the blower's expected draw (OEM fuse in that circuit is
+  typically 20-30A) with real headroom, unlike the 20A MD20A or the
+  20A-continuous-despite-"30A"-branding generic MOSFET modules also
+  considered.
 
 ### ESP32_Relay_30A_X2_V1.1 pinout
 
 All GPIOs below are broken out on JP1/JP2 per the bottom silkscreen
 (`information/*_Bottom.jpg`) and aren't used by any other onboard consumer.
 
-| Signal                      | GPIO | Function |
-|------------------------------|------|----------|
-| Onboard LED                   | G5   | relay board status LED |
-| Relay 1                        | G12  | switches one blower motor lead |
-| Relay 2                        | G13  | switches the other blower motor lead |
-| IBT-2 `RPWM` (channel R)       | G4   | channel R PWM speed signal (20 kHz) |
-| IBT-2 `R_EN` (channel R)       | G16  | channel R software interlock |
-| IBT-2 `LPWM` (channel L)       | G17  | channel L PWM speed signal (20 kHz) |
-| IBT-2 `L_EN` (channel L)       | G18  | channel L software interlock |
-| Ignition/D+ sense               | G34  | detects ignition/engine on (see optocoupler above) |
+| Signal              | GPIO | Function |
+|----------------------|------|----------|
+| Onboard LED            | G5   | relay board status LED |
+| Relay 1                 | G12  | switches one blower motor lead |
+| Relay 2                 | G13  | switches the other blower motor lead |
+| MD30C `PWM`             | G4   | motor speed signal (20 kHz) |
+| Opto module `VO`         | G27  | stand-in 3.3V source, held ALWAYS_ON (see "Powering the opto module's VO" above), JP1 outer row |
+| Ignition/D+ sense        | G25  | detects ignition/engine on (see optocoupler above), JP1 outer row |
 
-Right now **both** IBT-2 channels (R and L) are software-switchable,
-because it isn't known yet which one spins the blower in the correct
-(factory) direction. Use the two commissioning buttons in ESPHome/HA
-(`IBT-2 Test: Channel R/L`, a 3s test pulse at 25%) to find out which
-channel is correct, then set `ibt2_use_channel_l`'s `initial_value` in
-`relay-2ch-hvac.yaml` accordingly (`false` = channel R, `true` = channel
-L). After that, the unused channel (`L_EN`/`LPWM` resp. `R_EN`/`RPWM`) can
-optionally be hardwired in hardware and removed from the config - the
-unused channel's `*_EN` tied fixed to 5V, its `*PWM` tied fixed to GND.
+GPIO16/17/18/34 (used by the earlier IBT-2 revision and an earlier
+revision of the opto module wiring) are all free/unused now - the MD30C
+only needs one PWM signal from the ESP32, and the opto module's two
+signals moved to GPIO27/GPIO25 on JP1's outer row.
 
-### IBT-2 wiring
+### MD30C wiring
 
-- `RPWM` → GPIO4, `R_EN` → GPIO16 (ESP32 board, channel R)
-- `LPWM` → GPIO17, `L_EN` → GPIO18 (ESP32 board, channel L)
-  (both channels software-switched for now, see above - optionally
-  hardwire the unused one later once the correct direction is known)
-- `VCC` (logic) → 5V, `GND` → common ground with the ESP32 board
-- `B+`/`B-` → leisure battery (fused!)
-- `M+`/`M-` → to the changeover (NO) contacts of Relay 1/2
+Per the Cytron MD30C user's manual (Rev 1.4):
+
+- **Jumpers:** `JP4` = Don't Care (X), `JP6` = `EXT PWM` - this switches
+  the board from its standalone onboard-potentiometer mode into
+  microcontroller-controlled mode. Do this *after* the standalone bench
+  check below, not before.
+- **3-pin `INPUT` header** (`GND` / `PWM` / `DIR`, in that order):
+  - `PWM` → GPIO4 on the ESP32 board.
+  - `GND` → common ground with the ESP32 board (this is the logic
+    reference ground for the signal header, separate from the heavy
+    `POWER`/`MOTOR` terminal wiring below - tie both boards' grounds
+    together somewhere, e.g. at the battery negative).
+  - `DIR` → hardwired directly to `GND` (either right there on the
+    header, or with a jumper wire) - **not** to a GPIO. Per the MD30C's
+    truth table, `PWM=High, DIR=Low` drives Output A; the blower only
+    ever needs one direction, so there's nothing to switch at runtime.
+    If it spins the wrong way once wired up, swap the two motor leads at
+    `MOTOR A`/`B` instead of touching `DIR` or the config - electrically
+    identical, no reflash needed. Bonus: the manual explicitly warns to
+    have `DIR` or `PWM` at LOW when power comes on - hardwiring `DIR` to
+    GND satisfies that automatically, even before the ESP32 has booted.
+- **`POWER` terminal** (`+`/`-`) → leisure battery, fused. This is the
+  *only* power input the MD30C needs - it also derives its own logic
+  supply from here internally, nothing extra required from the ESP32
+  board's 5V rail.
+- **`MOTOR` terminal** (`A`/`B`) → to the changeover (NO) contacts of
+  Relay 1/2. ⚠️ The manual is explicit: **connecting the battery to the
+  `MOTOR` terminal instead of `POWER` burns the MOSFETs, and that's not
+  covered under warranty** - double-check before powering up.
+- For current draw >20A (our expected range), the manual recommends
+  soldering the wires directly to the pads on the PCB's bottom layer
+  rather than relying only on the screw terminals.
+
+**Bench-test the MD30C completely standalone before wiring it to the ESP32
+at all:** temporarily set `JP4`=`INT POT`, `JP6`=`INT PWM`, connect
+battery+motor, and use the onboard Test Button A/B (with the onboard
+speed potentiometer) to confirm the board and motor actually work - no
+microcontroller needed for this check. Only then switch the jumpers to
+`JP4`=Don't Care, `JP6`=`EXT PWM` and wire up the ESP32 signal header.
+This is exactly the standalone check the IBT-2 didn't give us, and would
+have caught its failure immediately instead of after a long wiring-level
+debugging session.
 
 ### Relay wiring (per relay)
 
 - **COM** → motor lead to the blower
 - **NC** (de-energized) → OEM Sprinter controller
-- **NO** (energized) → IBT-2 `M+`/`M-`
+- **NO** (energized) → MD30C `MOTOR A`/`B`
 
 Both relays **always** switch both motor leads together (see
 `fan_source_battery` in `relay-2ch-hvac.yaml`), so the OEM controller and
-the IBT-2 can never both be connected to either lead at the same time.
+the MD30C can never both be connected to either lead at the same time.
 
 ## ESPHome configuration
 
-- `relay-2ch-hvac.yaml` - board-specific config (relays, IBT-2, fan control
-  entity)
+- `relay-2ch-hvac.yaml` - board-specific config (relays, motor driver, fan
+  control entity)
 - `.basics.yaml` - shared base config (WiFi, API, OTA, web server,
   watchdog); pulled in via `packages:`
 - `secrets.yaml.example` - template for `secrets.yaml` (WiFi credentials,
