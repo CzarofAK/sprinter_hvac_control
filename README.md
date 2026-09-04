@@ -71,7 +71,7 @@ whichever is easiest to tap on the vehicle):
   re-arm battery mode (`battery_mode_allowed`). A selection attempt before
   that is rejected and logged.
 
-**D+ sense input (GPIO34):** D+ sits at vehicle voltage (12-14V+, possibly
+**D+ sense input (GPIO25):** D+ sits at vehicle voltage (12-14V+, possibly
 higher spikes while charging) - that must **never** go directly into an
 ESP32 GPIO (max. 3.3V). Implemented through a 2-channel, EL817-based opto
 isolation module (galvanically isolated, no direct electrical reference
@@ -85,12 +85,12 @@ already built onto the module, so no discrete parts needed:
   `(V_D+ - 1.2V) / 470Ω` ≈ 25mA at 13V, ≈ 29mA at 15V - comfortably under
   the module's 50mA max LED current rating.
 - `SIN1` → vehicle/chassis ground.
-- `VO` → GPIO16 (`switch.opto_vcc` in `relay-2ch-hvac.yaml`, held
+- `VO` → GPIO27 (`switch.opto_vcc` in `relay-2ch-hvac.yaml`, held
   permanently high in software as a stand-in 3.3V source - see "Powering
   the opto module's VO" below). Load here is only
   `3.3V / 10kΩ` ≈ 0.33mA through the module's onboard `R2` - unrelated to
   the 50mA LED-side rating, and trivial for a GPIO.
-- `OUT1` → GPIO34. No external pull-up needed - the module's onboard `R2`
+- `OUT1` → GPIO25. No external pull-up needed - the module's onboard `R2`
   already does that job once `VO` is powered.
 - `OGND` → common ground with the ESP32 board.
 
@@ -100,13 +100,18 @@ compensated in the YAML config via `inverted: true`, so
 `binary_sensor.ignition_active` still reports "on" when D+ is actually
 active.
 
-GPIO34 was chosen deliberately because it's a pure input pin (no
-boot-strapping concerns) and is only ever read digitally here.
+GPIO25/GPIO27 sit on JP1's outer row (board-edge side), moved there from
+JP2 to free up space next to the MD30C signals. **Verify the physical
+position with a multimeter before soldering anything permanent** (toggle
+each from ESPHome/HA, probe the pin you think it is) rather than trusting
+the header layout derived from mirrored reference photos - that same
+reasoning got one pin wrong earlier in this project (see the RPWM/GPIO0
+mixup during IBT-2 commissioning), so it's not a one-off precaution.
 
 ### Powering the opto module's VO
 
 Neither the ESP32_Relay_30A_X2_V1.1 nor the MD30C breaks out a spare
-3.3V pin, so `VO` is powered from **GPIO16 held permanently high**
+3.3V pin, so `VO` is powered from **GPIO27 held permanently high**
 (`switch.opto_vcc`, `restore_mode: ALWAYS_ON`) instead of a dedicated
 3.3V rail. This works cleanly here because the load is tiny (≈0.33mA,
 see above) - nowhere near a GPIO's ~20mA safe continuous rating - but two
@@ -184,12 +189,13 @@ All GPIOs below are broken out on JP1/JP2 per the bottom silkscreen
 | Relay 1                 | G12  | switches one blower motor lead |
 | Relay 2                 | G13  | switches the other blower motor lead |
 | MD30C `PWM`             | G4   | motor speed signal (20 kHz) |
-| Opto module `VO`         | G16  | stand-in 3.3V source, held ALWAYS_ON (see "Powering the opto module's VO" above) |
-| Ignition/D+ sense        | G34  | detects ignition/engine on (see optocoupler above) |
+| Opto module `VO`         | G27  | stand-in 3.3V source, held ALWAYS_ON (see "Powering the opto module's VO" above), JP1 outer row |
+| Ignition/D+ sense        | G25  | detects ignition/engine on (see optocoupler above), JP1 outer row |
 
-GPIO17/18 (used by the earlier IBT-2 revision for its second channel and
-enable pin) are free/unused now - the MD30C only needs one PWM signal
-from the ESP32, and GPIO16 has been repurposed for the opto module.
+GPIO16/17/18/34 (used by the earlier IBT-2 revision and an earlier
+revision of the opto module wiring) are all free/unused now - the MD30C
+only needs one PWM signal from the ESP32, and the opto module's two
+signals moved to GPIO27/GPIO25 on JP1's outer row.
 
 ### MD30C wiring
 

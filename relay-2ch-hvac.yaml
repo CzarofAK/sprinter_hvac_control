@@ -67,13 +67,13 @@ binary_sensor:
   # (IVCC/SIN1/VO/OUT1/OGND). `inverted: true` because the module's
   # output is active-low (its onboard pull-up resistor holds OUT1 high;
   # the phototransistor pulls it low while D+ is present). No external
-  # pull-up needed on GPIO34 - the module's own onboard R2 (10kΩ, VO to
+  # pull-up needed on GPIO25 - the module's own onboard R2 (10kΩ, VO to
   # OUT1) does that job, powered by switch.opto_vcc below.
   - platform: gpio
     name: "Ignition (D+) Active"
     id: ignition_active
     pin:
-      number: 34
+      number: 25
       mode: INPUT
       inverted: true
     filters:
@@ -120,12 +120,10 @@ switch:
   # doesn't break one out. Load is tiny (module's onboard 10kΩ pull-up:
   # 3.3V/10kΩ ≈ 0.33mA), nowhere near a GPIO's ~20mA safe continuous
   # rating. restore_mode ALWAYS_ON (opposite of the fail-safe switches
-  # above) since this just needs to stay high permanently - GPIO16 was
-  # picked because we already know its exact physical header position
-  # from the earlier IBT-2 commissioning (freed up by the MD30C switch).
+  # above) since this just needs to stay high permanently.
   - platform: gpio
     id: opto_vcc
-    pin: 16
+    pin: 27
     internal: true
     restore_mode: ALWAYS_ON
 
