@@ -4,7 +4,7 @@ substitutions:
   # How long to wait after ignition OFF (D+ drops) before battery mode is
   # re-armed. Buffer for the OEM blower controller's after-run - tune this
   # for your vehicle.
-  ignition_off_delay: 5min
+  ignition_off_delay: 20sec
 
 packages:
   basics: !include .basics.yaml
@@ -30,6 +30,7 @@ output:
   - platform: gpio
     id: output_led
     pin: 5
+    inverted: true
 
   # MD30C `PWM` input (3-pin INPUT header: GND/PWM/DIR). Blower speed
   # signal, 20kHz = above the audible range and within the MD30C's max

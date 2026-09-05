@@ -76,9 +76,11 @@ optional manual bypass.
   be bypassed by the override below.
 - **Ignition off → after-run timer, only then re-armed.** The OEM
   blower controller may keep running briefly after shutdown. Only
-  `ignition_off_delay` (default: 5 minutes, adjustable in `substitutions:`
-  at the top of `relay-2ch-hvac.yaml`) after the ignition signal goes
-  inactive does the system re-arm battery mode (`battery_mode_allowed`).
+  `ignition_off_delay` (currently 20 seconds, tuned down from an initial
+  conservative 5-minute placeholder once Terminal 15R replaced 30t -
+  adjustable in `substitutions:` at the top of `relay-2ch-hvac.yaml`)
+  after the ignition signal goes inactive does the system re-arm battery
+  mode (`battery_mode_allowed`).
   A selection attempt before that is rejected and logged.
 
 **Manual override (`switch.battery_mode_override`):** lets you arm
