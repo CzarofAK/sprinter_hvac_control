@@ -50,7 +50,14 @@ like 42% from a phone touchscreen.
 The switch-over sequence always keeps the PWM signal at 0% while the
 relays are actually switching, and never leaves the relays on battery
 without the PWM signal being set afterwards - and the reverse on the way
-back: PWM to 0% first, then the relays return to OEM. See
+back: PWM to 0% first, then a `motor_coast_down_delay` wait (default 2s,
+adjustable in `substitutions:`), then the relays return to OEM. That wait
+exists because a spinning motor keeps generating back-EMF/current for a
+moment after PWM drops to 0%, purely from its own inertia - switching the
+relay contacts before that settles would be hot-switching an inductive
+load, which arcs and wears the contacts over time. This applies to every
+disengage path (ignition on, manual slider to 0%, end of the Motor Test
+button), since they all go through `script.motor_disengage`. See
 `script.motor_engage`/`script.motor_disengage` in `relay-2ch-hvac.yaml`
 for the exact sequence.
 
@@ -76,9 +83,11 @@ optional manual bypass.
   be bypassed by the override below.
 - **Ignition off → after-run timer, only then re-armed.** The OEM
   blower controller may keep running briefly after shutdown. Only
-  `ignition_off_delay` (default: 5 minutes, adjustable in `substitutions:`
-  at the top of `relay-2ch-hvac.yaml`) after the ignition signal goes
-  inactive does the system re-arm battery mode (`battery_mode_allowed`).
+  `ignition_off_delay` (currently 20 seconds, tuned down from an initial
+  conservative 5-minute placeholder once Terminal 15R replaced 30t -
+  adjustable in `substitutions:` at the top of `relay-2ch-hvac.yaml`)
+  after the ignition signal goes inactive does the system re-arm battery
+  mode (`battery_mode_allowed`).
   A selection attempt before that is rejected and logged.
 
 **Manual override (`switch.battery_mode_override`):** lets you arm
