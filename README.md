@@ -54,25 +54,40 @@ back: PWM to 0% first, then the relays return to OEM. See
 `script.motor_engage`/`script.motor_disengage` in `relay-2ch-hvac.yaml`
 for the exact sequence.
 
-### Ignition/D+ interlock
+### Ignition / Terminal 30t interlock
 
-On top of the manual selection there is a hardware interlock driven by an
-ignition/running signal (D+ from the alternator, or e.g. terminal 15 -
-whichever is easiest to tap on the vehicle):
+On top of the manual selection there is a hardware interlock driven by a
+vehicle running signal - in this build, Mercedes **Terminal 30t** (a
+timed, relay-switched permanent-positive terminal), rather than classic
+alternator D+ or terminal 15:
 
-- **Ignition/engine on → immediately back to the OEM controller.** As soon
-  as the D+ signal goes active, the software instantly switches back to
+- **Terminal 30t active → immediately back to the OEM controller.** As
+  soon as the signal goes active, the software instantly switches back to
   0% (`binary_sensor.ignition_active`, `on_press`) - regardless of
-  whatever was selected in HA. No waiting, no exception.
-- **Ignition/engine off → after-run timer, only then re-armed.** The OEM
+  whatever was selected in HA. No waiting, no exception, and this cannot
+  be bypassed by the override below.
+- **Terminal 30t inactive → after-run timer, only then re-armed.** The OEM
   blower controller may keep running briefly after shutdown. Only
   `ignition_off_delay` (default: 5 minutes, adjustable in `substitutions:`
-  at the top of `relay-2ch-hvac.yaml`) after ignition OFF does the system
-  re-arm battery mode (`battery_mode_allowed`). A selection attempt before
-  that is rejected and logged.
+  at the top of `relay-2ch-hvac.yaml`) after Terminal 30t goes inactive
+  does the system re-arm battery mode (`battery_mode_allowed`). A
+  selection attempt before that is rejected and logged.
 
-**D+ sense input (GPIO25):** D+ sits at vehicle voltage (12-14V+, possibly
-higher spikes while charging) - that must **never** go directly into an
+**Manual override (`switch.battery_mode_override`):** Terminal 30t is
+*not* a clean "engine running" signal - by design it stays active for
+15-30+ minutes after the vehicle is actually parked (Sprinter-specific
+behavior), which is far longer than any real OEM blower after-run and
+would make waiting for `ignition_off_delay` alone impractical for normal
+use. This switch lets you arm battery mode immediately once you know the
+vehicle is genuinely parked, without waiting out Terminal 30t's own long
+tail. It does not weaken the core safety guarantee: the instant Terminal
+30t goes active again (real driving resumes), the interlock above forces
+everything back to the OEM controller *and* turns this override back off
+unconditionally - so re-arming after the next stop is always a fresh,
+deliberate choice, never a forgotten switch left on from before.
+
+**Terminal 30t sense input (GPIO25):** Terminal 30t sits at vehicle voltage
+(12-14V+, possibly higher spikes while charging) - that must **never** go directly into an
 ESP32 GPIO (max. 3.3V). Implemented through a 2-channel, EL817-based opto
 isolation module (galvanically isolated, no direct electrical reference
 needed between the vehicle electrics and the ESP32 logic). Per channel it
@@ -80,9 +95,9 @@ has 5 pins - `IVCC` / `SIN1` / `VO` / `OUT1` / `OGND` - with the LED-side
 series resistor (`R1`, 470Ω) and the output-side pull-up (`R2`, 10kΩ)
 already built onto the module, so no discrete parts needed:
 
-- `IVCC` → D+, directly, no external resistor - `R1` (470Ω) is already on
-  the module. LED current at typical automotive voltages:
-  `(V_D+ - 1.2V) / 470Ω` ≈ 25mA at 13V, ≈ 29mA at 15V - comfortably under
+- `IVCC` → Terminal 30t, directly, no external resistor - `R1` (470Ω) is
+  already on the module. LED current at typical automotive voltages:
+  `(V_30t - 1.2V) / 470Ω` ≈ 25mA at 13V, ≈ 29mA at 15V - comfortably under
   the module's 50mA max LED current rating.
 - `SIN1` → vehicle/chassis ground.
 - `VO` → GPIO27 (`switch.opto_vcc` in `relay-2ch-hvac.yaml`, held
@@ -190,7 +205,7 @@ All GPIOs below are broken out on JP1/JP2 per the bottom silkscreen
 | Relay 2                 | G13  | switches the other blower motor lead |
 | MD30C `PWM`             | G4   | motor speed signal (20 kHz) |
 | Opto module `VO`         | G27  | stand-in 3.3V source, held ALWAYS_ON (see "Powering the opto module's VO" above), JP1 outer row |
-| Ignition/D+ sense        | G25  | detects ignition/engine on (see optocoupler above), JP1 outer row |
+| Terminal 30t sense        | G25  | detects vehicle running (see optocoupler above), JP1 outer row |
 
 GPIO16/17/18/34 (used by the earlier IBT-2 revision and an earlier
 revision of the opto module wiring) are all free/unused now - the MD30C
