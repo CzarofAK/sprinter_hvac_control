@@ -50,7 +50,14 @@ like 42% from a phone touchscreen.
 The switch-over sequence always keeps the PWM signal at 0% while the
 relays are actually switching, and never leaves the relays on battery
 without the PWM signal being set afterwards - and the reverse on the way
-back: PWM to 0% first, then the relays return to OEM. See
+back: PWM to 0% first, then a `motor_coast_down_delay` wait (default 2s,
+adjustable in `substitutions:`), then the relays return to OEM. That wait
+exists because a spinning motor keeps generating back-EMF/current for a
+moment after PWM drops to 0%, purely from its own inertia - switching the
+relay contacts before that settles would be hot-switching an inductive
+load, which arcs and wears the contacts over time. This applies to every
+disengage path (ignition on, manual slider to 0%, end of the Motor Test
+button), since they all go through `script.motor_disengage`. See
 `script.motor_engage`/`script.motor_disengage` in `relay-2ch-hvac.yaml`
 for the exact sequence.
 

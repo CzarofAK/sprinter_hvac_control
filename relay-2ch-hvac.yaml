@@ -6,6 +6,13 @@ substitutions:
   # for your vehicle.
   ignition_off_delay: 20sec
 
+  # How long to wait after PWM drops to 0% before the relays actually
+  # switch, in script.motor_disengage - gives the motor time to coast
+  # down so its back-EMF/current has settled before the contacts break,
+  # instead of hot-switching an inductive load. Tune to how long your
+  # specific motor takes to spin down from a typical running speed.
+  motor_coast_down_delay: 2sec
+
 packages:
   basics: !include .basics.yaml
 
@@ -208,11 +215,20 @@ script:
           id: pwm_motor
           level: !lambda "return percent / 100.0f;"
 
-  # Drives PWM to 0%, then switches the relays back to the OEM controller.
-  # Exact reverse order of motor_engage.
+  # Drives PWM to 0%, waits for the motor to coast down, then switches the
+  # relays back to the OEM controller. Exact reverse order of
+  # motor_engage, plus the coast-down wait: a spinning motor doesn't stop
+  # the instant PWM hits 0% - it keeps generating back-EMF/current while
+  # it spins down under its own inertia. Switching the relay contacts
+  # while that's still happening is "hot switching" an inductive load,
+  # which arcs and wears the contacts. ${motor_coast_down_delay} gives it
+  # time to settle first. This applies to every disengage path (ignition
+  # on, manual slider to 0%, end of the Motor Test button) since they all
+  # go through this script.
   - id: motor_disengage
     then:
       - output.set_level: { id: pwm_motor, level: 0% }
+      - delay: ${motor_coast_down_delay}
       - switch.turn_off: fan_source_battery
 
   # After-run timer following ignition OFF. mode: restart -> every
