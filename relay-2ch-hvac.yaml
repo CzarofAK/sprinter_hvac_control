@@ -60,24 +60,27 @@ light:
     output: output_led
 
 binary_sensor:
-  # Vehicle running signal - wired to Mercedes Terminal 30t (a timed,
-  # relay-switched permanent-positive terminal) rather than classic
-  # alternator D+, galvanically isolated via a 2-channel EL817-based opto
+  # Vehicle running signal - wired to Mercedes Terminal 15R (switched
+  # positive, active only while the ignition is actually on; a filtered
+  # variant of classic Terminal 15) rather than the initially-tried
+  # Terminal 30t, galvanically isolated via a 2-channel EL817-based opto
   # isolation module down to the ESP32's 3.3V logic level - see README,
-  # "D+ sense input", for the exact module wiring
+  # "Terminal 15R sense input", for the exact module wiring
   # (IVCC/SIN1/VO/OUT1/OGND). `inverted: true` because the module's
   # output is active-low (its onboard pull-up resistor holds OUT1 high;
-  # the phototransistor pulls it low while Terminal 30t is active). No
+  # the phototransistor pulls it low while Terminal 15R is active). No
   # external pull-up needed on GPIO25 - the module's own onboard R2
   # (10kΩ, VO to OUT1) does that job, powered by switch.opto_vcc below.
   #
-  # Terminal 30t stays active for a long time after the vehicle is
-  # actually parked (15-30+ minutes on Sprinters, by design) - much
-  # longer than the OEM blower's real after-run. See
-  # switch.battery_mode_override below for the manual bypass this makes
-  # necessary.
+  # Unlike Terminal 30t (a timed, relay-switched permanent-positive that
+  # stays active 15-30+ minutes after parking, by design), 15R drops
+  # essentially immediately when the ignition is turned off - so
+  # ignition_off_delay alone should be enough here without needing
+  # switch.battery_mode_override below for routine use. The override
+  # still exists as an optional manual bypass (e.g. for testing), it's
+  # just no longer a practical necessity the way it was under 30t.
   - platform: gpio
-    name: "Terminal 30t Active"
+    name: "Terminal 15R Active"
     id: ignition_active
     pin:
       number: 25
@@ -88,8 +91,7 @@ binary_sensor:
       - delayed_off: 200ms
     trigger_on_initial_state: true
     on_press:
-      # Terminal 30t comes on (driving, or its own long tail from a
-      # previous stop) -> IMMEDIATELY back to the OEM controller, no
+      # Ignition comes on -> IMMEDIATELY back to the OEM controller, no
       # waiting, no exception. Also clears any override, so the next
       # time battery mode is wanted after parking, it's a fresh,
       # deliberate decision rather than a forgotten switch left on.
@@ -103,11 +105,9 @@ binary_sensor:
           value: 0
       - script.execute: motor_disengage
     on_release:
-      # Terminal 30t goes off -> start the after-run timer; only once it
+      # Ignition goes off -> start the after-run timer; only once it
       # elapses is battery mode re-armed (the OEM blower may still run on
-      # briefly). In practice this timer will usually lose the race
-      # against switch.battery_mode_override below, since 30t's own tail
-      # is so much longer than ignition_off_delay.
+      # briefly).
       - script.execute: ignition_off_delay_script
 
 switch:
@@ -140,16 +140,17 @@ switch:
     internal: true
     restore_mode: ALWAYS_ON
 
-  # Manual bypass for the Terminal 30t after-run wait. Terminal 30t stays
-  # active for 15-30+ minutes after the vehicle is actually parked - far
-  # longer than ignition_off_delay is meant to cover - so waiting for the
-  # timer alone would make battery mode impractical to use after most
-  # stops. Flip this ON to arm battery mode immediately, when you know
-  # the vehicle is genuinely parked even though Terminal 30t hasn't
-  # dropped yet.
+  # Manual bypass for the after-run wait. Originally added because the
+  # first-tried signal (Terminal 30t) stays active 15-30+ minutes after
+  # the vehicle is actually parked, making the plain timer impractical.
+  # Now that ignition sense is wired to Terminal 15R instead (drops
+  # essentially immediately at ignition-off), this is no longer a routine
+  # necessity - ignition_off_delay alone should re-arm promptly on its
+  # own. Kept as an optional manual bypass (e.g. for testing, or arming
+  # immediately without waiting out ignition_off_delay at all).
   #
-  # This does NOT weaken the core safety guarantee: the moment Terminal
-  # 30t actually goes active again (real driving resumes), the
+  # This does NOT weaken the core safety guarantee: the moment the
+  # ignition actually goes active again (real driving resumes), the
   # binary_sensor's on_press above forces everything back to the OEM
   # controller and turns this override back off unconditionally,
   # regardless of its state. So it can never be "the reason" battery mode
