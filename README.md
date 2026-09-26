@@ -9,8 +9,9 @@ The OEM climate control stays fully intact: whenever the ignition is on,
 or the controller is unpowered, crashed or booting, the blower is wired to
 the factory controller exactly as delivered.
 
-<!-- PHOTO: overview / installed controller -->
-<!-- ![Installed controller](information/installed_overview.jpg) -->
+![Controller installed behind the glovebox](information/installation_glovebox.jpg)
+*Installed behind the passenger-side glovebox: MD30C stacked on the
+ESP32 relay board, on a base plate, with WAGO 221 distribution.*
 
 ## Design principles
 
@@ -126,6 +127,11 @@ it, with little margin.
 Both relays are only ever switched together (`fan_source_battery`), so the
 OEM controller and the MD30C can never share a motor lead.
 
+![Blower connection](information/blower_connection.jpg)
+*Blower side: the connection between the motor and the OEM blower
+regulator (A 000 906 93 07, mounted on the blower housing) is
+intercepted and routed to the changeover relays.*
+
 ### MD30C wiring
 
 Per Cytron MD30C user's manual, Rev 1.4:
@@ -234,7 +240,7 @@ rating.
 | `relay-2ch-hvac.yaml` | Device config: relays, PWM, interlock, scripts, entities |
 | `.basics.yaml` | Shared base (WiFi + fallback AP, API, OTA, web server, WiFi watchdog), included via `packages:` |
 | `secrets.yaml.example` | Template - copy to `secrets.yaml` (git-ignored) |
-| `information/` | Board photos and reference material |
+| `information/` | Board and installation photos |
 
 ```bash
 cp secrets.yaml.example secrets.yaml   # fill in
