@@ -24,6 +24,8 @@ ESP32 relay board, on a base plate, with WAGO 221 distribution.*
   moves.
 - **Autonomous.** All safety logic runs on the ESP32. Home Assistant is a
   remote control, not a dependency - the device works without WiFi or HA.
+  A manual button or poti can easily added to the build if physical control
+  is preferred.
 
 ## Architecture
 
