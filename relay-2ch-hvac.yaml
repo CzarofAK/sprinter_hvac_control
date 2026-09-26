@@ -1,7 +1,7 @@
 substitutions:
   name: relay-2ch-hvac
 
-  # How long to wait after ignition OFF (D+ drops) before battery mode is
+  # How long to wait after ignition OFF (Terminal 15R drops) before battery mode is
   # re-armed. Buffer for the OEM blower controller's after-run - tune this
   # for your vehicle.
   ignition_off_delay: 20sec
@@ -25,7 +25,7 @@ esp32:
   variant: esp32
 
 globals:
-  # Battery mode is only allowed while ignition/D+ is off AND the after-run
+  # Battery mode is only allowed while ignition (Terminal 15R) is off AND the after-run
   # timer has elapsed. See binary_sensor.ignition_active and
   # script.ignition_off_delay_script below.
   - id: battery_mode_allowed
@@ -136,7 +136,7 @@ switch:
     internal: true
     restore_mode: ALWAYS_OFF
 
-  # Powers the D+ opto isolation module's VO (output-side pull-up supply)
+  # Powers the Terminal 15R opto isolation module's VO (output-side pull-up supply)
   # straight from a GPIO instead of a dedicated 3.3V rail - this board
   # doesn't break one out. Load is tiny (module's onboard 10kΩ pull-up:
   # 3.3V/10kΩ ≈ 0.33mA), nowhere near a GPIO's ~20mA safe continuous
@@ -223,8 +223,7 @@ script:
   # while that's still happening is "hot switching" an inductive load,
   # which arcs and wears the contacts. ${motor_coast_down_delay} gives it
   # time to settle first. This applies to every disengage path (ignition
-  # on, manual slider to 0%, end of the Motor Test button) since they all
-  # go through this script.
+  # on, manual slider to 0%) since they all go through this script.
   - id: motor_disengage
     then:
       - output.set_level: { id: pwm_motor, level: 0% }
@@ -282,24 +281,3 @@ number:
           } else {
             id(motor_engage).execute(percent);
           }
-
-button:
-  # Commissioning helper: a short low-speed test pulse to verify the wiring
-  # (relays + MD30C) actually spins the blower before relying on the main
-  # slider. If the motor spins the wrong direction, swap the two motor
-  # leads at the MD30C's MOTOR A/B terminals rather than changing anything
-  # here - see the DIR comment on pwm_motor above.
-  - platform: template
-    name: "Motor Test (3s, 25%)"
-    entity_category: config
-    on_press:
-      - if:
-          condition:
-            lambda: "return id(battery_mode_allowed);"
-          then:
-            - switch.turn_on: fan_source_battery
-            - output.set_level: { id: pwm_motor, level: 25% }
-            - delay: 3s
-            - script.execute: motor_disengage
-          else:
-            - logger.log: "Test blocked: ignition on or after-run timer still running"

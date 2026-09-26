@@ -1,317 +1,271 @@
 # sprinter_hvac_control
 
-Runs the Sprinter's original HVAC blower off the leisure/house battery
-instead of the vehicle's own controller. Also adds an ESPHome web server
-and native HomeAssistant integration.
+Runs the Mercedes Sprinter's (VS30) original cab HVAC blower from the
+leisure battery while the vehicle is parked - for standby ventilation
+without waking the vehicle electrics. Built on ESPHome, with native Home
+Assistant integration and a local web UI.
 
-Uses a Cytron MD30C PWM motor driver plus an `ESP32_Relay_30A_X2_V1.1`
-board. The ESP32 board controls both the relays and the MD30C itself -
-control is therefore centralized in one place, and the OEM controller and
-the MD30C can never interfere with each other.
+The OEM climate control stays fully intact: whenever the ignition is on,
+or the controller is unpowered, crashed or booting, the blower is wired to
+the factory controller exactly as delivered.
 
-> **Hardware history:** this started out built around a generic IBT-2
-> (BTS7960) H-bridge driver. That specific unit turned out to be dead on
-> arrival (correct 3.3V logic signals measured at every input pin, but
-> essentially no power reaching the motor output even unloaded) - a
-> documented, apparently common failure mode for these cheap clone
-> boards. Since the blower never needs to reverse anyway (fan blades only
-> do anything useful in one direction), a full H-bridge was overkill to
-> begin with; the MD30C is a simpler, single-direction-friendly,
-> better-documented part sized to the blower's actual current draw. If
-> you're starting fresh, there's no reason to go through the IBT-2 at
-> all - go straight to the MD30C wiring below.
+![Controller installed behind the glovebox](information/installation_glovebox.jpg)
+*Installed behind the passenger-side glovebox: MD30C stacked on the
+ESP32 relay board, on a base plate, with WAGO 221 distribution.*
 
-## How it works
+## Design principles
 
-There is exactly one user-facing entity in HomeAssistant/the web UI:
-**"HVAC Fan (Battery)"** - a 0-100% slider (`number`) in steps of 10, so it
-only ever lands on round numbers (0/10/20/.../100), not something fiddly
-like 42% from a phone touchscreen.
+- **Fail-safe by default.** Both changeover relays rest on NC = OEM
+  controller. No power, no firmware, no signal → factory behaviour.
+- **Ignition always wins.** Terminal 15R active forces the OEM path
+  immediately; nothing in the UI can override that.
+- **Cold switching only.** Relay contacts never make or break motor
+  current - PWM is at 0% and the motor has coasted down before any relay
+  moves.
+- **Autonomous.** All safety logic runs on the ESP32. Home Assistant is a
+  remote control, not a dependency - the device works without WiFi or HA.
 
-> Implemented as a `number` rather than ESPHome's `fan:` domain on purpose:
-> the current template fan component is trigger-/publish-state-based
-> (state is set optimistically, *then* `on_turn_on`/`on_speed_set` fire)
-> and has known ordering issues between turning on and setting speed. For a
-> safety-relevant switch-over we want to own the exact sequence ourselves -
-> `number` with `set_action` is the more robust, long-stable choice for
-> that (an earlier revision used `select` with fixed Low/Medium/High
-> options for the same reason - functionally identical, `number` just adds
-> continuous PWM resolution instead of 3 fixed steps). From HA's point of
-> view it's one control either way.
+## Architecture
 
-- **0% (default/fail-safe):** both relays de-energized → the OEM
-  controller is connected to the blower and works exactly as from the
-  factory. The MD30C's PWM input is held at 0% (no power to the motor).
-  This is also the state whenever the ESP32 has no power, has crashed, or
-  is still booting.
-- **10-100%:** relays switch the motor leads over to the MD30C, and the
-  selected percentage is driven via PWM duty cycle.
+```mermaid
+flowchart LR
+    LB[Leisure battery] -->|fused| MD[Cytron MD30C]
+    ESP[ESP32 relay board] -->|PWM 20 kHz, GPIO4| MD
+    T15[Terminal 15R] -->|EL817 opto, GPIO25| ESP
+    OEM[OEM blower controller] -->|NC| R[Relay 1 + 2<br/>changeover]
+    MD -->|NO| R
+    ESP -->|GPIO12/13| R
+    R -->|COM| M((Blower motor))
+```
 
-The switch-over sequence always keeps the PWM signal at 0% while the
-relays are actually switching, and never leaves the relays on battery
-without the PWM signal being set afterwards - and the reverse on the way
-back: PWM to 0% first, then a `motor_coast_down_delay` wait (default 2s,
-adjustable in `substitutions:`), then the relays return to OEM. That wait
-exists because a spinning motor keeps generating back-EMF/current for a
-moment after PWM drops to 0%, purely from its own inertia - switching the
-relay contacts before that settles would be hot-switching an inductive
-load, which arcs and wears the contacts over time. This applies to every
-disengage path (ignition on, manual slider to 0%, end of the Motor Test
-button), since they all go through `script.motor_disengage`. See
-`script.motor_engage`/`script.motor_disengage` in `relay-2ch-hvac.yaml`
-for the exact sequence.
+## Operation
 
-### Ignition / Terminal 15R interlock
-
-On top of the manual selection there is a hardware interlock driven by a
-vehicle running signal - in this build, Mercedes **Terminal 15R**
-(switched positive, active only while the ignition is actually on - a
-filtered variant of classic Terminal 15). An earlier revision used
-**Terminal 30t** (a timed, relay-switched permanent-positive terminal)
-instead; that turned out to stay active 15-30+ minutes after the vehicle
-is actually parked (by design, unrelated to the OEM blower's own
-after-run), which made the plain after-run timer impractical for normal
-use on its own - see `switch.battery_mode_override` below, added to work
-around that. Terminal 15R drops essentially immediately at ignition-off,
-so that workaround usually isn't needed anymore - it's kept as an
-optional manual bypass.
-
-- **Ignition on → immediately back to the OEM controller.** As
-  soon as the signal goes active, the software instantly switches back to
-  0% (`binary_sensor.ignition_active`, `on_press`) - regardless of
-  whatever was selected in HA. No waiting, no exception, and this cannot
-  be bypassed by the override below.
-- **Ignition off → after-run timer, only then re-armed.** The OEM
-  blower controller may keep running briefly after shutdown. Only
-  `ignition_off_delay` (currently 20 seconds, tuned down from an initial
-  conservative 5-minute placeholder once Terminal 15R replaced 30t -
-  adjustable in `substitutions:` at the top of `relay-2ch-hvac.yaml`)
-  after the ignition signal goes inactive does the system re-arm battery
-  mode (`battery_mode_allowed`).
-  A selection attempt before that is rejected and logged.
-
-**Manual override (`switch.battery_mode_override`):** lets you arm
-battery mode immediately without waiting out `ignition_off_delay` at all
-- useful for testing, or if you're certain it's safe to skip the wait.
-It does not weaken the core safety guarantee: the instant the ignition
-signal goes active again (real driving resumes), the interlock above
-forces everything back to the OEM controller *and* turns this override
-back off unconditionally - so re-arming after the next stop is always a
-fresh, deliberate choice, never a forgotten switch left on from before.
-
-**Terminal 15R sense input (GPIO25):** Terminal 15R sits at vehicle voltage
-(12-14V+, possibly higher spikes while charging) - that must **never** go directly into an
-ESP32 GPIO (max. 3.3V). Implemented through a 2-channel, EL817-based opto
-isolation module (galvanically isolated, no direct electrical reference
-needed between the vehicle electrics and the ESP32 logic). Per channel it
-has 5 pins - `IVCC` / `SIN1` / `VO` / `OUT1` / `OGND` - with the LED-side
-series resistor (`R1`, 470Ω) and the output-side pull-up (`R2`, 10kΩ)
-already built onto the module, so no discrete parts needed:
-
-- `IVCC` → Terminal 15R, directly, no external resistor - `R1` (470Ω) is
-  already on the module. LED current at typical automotive voltages:
-  `(V_15R - 1.2V) / 470Ω` ≈ 25mA at 13V, ≈ 29mA at 15V - comfortably under
-  the module's 50mA max LED current rating.
-- `SIN1` → vehicle/chassis ground.
-- `VO` → GPIO27 (`switch.opto_vcc` in `relay-2ch-hvac.yaml`, held
-  permanently high in software as a stand-in 3.3V source - see "Powering
-  the opto module's VO" below). Load here is only
-  `3.3V / 10kΩ` ≈ 0.33mA through the module's onboard `R2` - unrelated to
-  the 50mA LED-side rating, and trivial for a GPIO.
-- `OUT1` → GPIO25. No external pull-up needed - the module's onboard `R2`
-  already does that job once `VO` is powered.
-- `OGND` → common ground with the ESP32 board.
-
-This makes the pin logic active-low (`R2` holds `OUT1` high at rest; the
-phototransistor pulls it toward `OGND` while D+ is present) - already
-compensated in the YAML config via `inverted: true`, so
-`binary_sensor.ignition_active` still reports "on" when D+ is actually
-active.
-
-GPIO25/GPIO27 sit on JP1's outer row (board-edge side), moved there from
-JP2 to free up space next to the MD30C signals. **Verify the physical
-position with a multimeter before soldering anything permanent** (toggle
-each from ESPHome/HA, probe the pin you think it is) rather than trusting
-the header layout derived from mirrored reference photos - that same
-reasoning got one pin wrong earlier in this project (see the RPWM/GPIO0
-mixup during IBT-2 commissioning), so it's not a one-off precaution.
-
-### Powering the opto module's VO
-
-Neither the ESP32_Relay_30A_X2_V1.1 nor the MD30C breaks out a spare
-3.3V pin, so `VO` is powered from **GPIO27 held permanently high**
-(`switch.opto_vcc`, `restore_mode: ALWAYS_ON`) instead of a dedicated
-3.3V rail. This works cleanly here because the load is tiny (≈0.33mA,
-see above) - nowhere near a GPIO's ~20mA safe continuous rating - but two
-things are worth knowing:
-
-- A GPIO used this way has no current-limiting/short-circuit protection
-  of its own, unlike a proper regulated rail. Fine for a clean,
-  low-current load like this; not something to reuse for anything with
-  real current draw.
-- `restore_mode: ALWAYS_ON` (the opposite of the fail-safe `ALWAYS_OFF`
-  used elsewhere in this config) - it just needs to stay high
-  permanently. If it's briefly undefined for a moment during boot before
-  ESPHome takes over the pin, the worst case is a momentarily-wrong D+
-  reading, which only pushes `battery_mode_allowed` toward staying
-  `false` longer - the safe direction, not the dangerous one.
-
-## Bench test setup
-
-Before installing anything in the van, this is tested on a separate,
-used blower + OEM controller assembly - not on the part actually fitted to
-the vehicle. Relay wiring, the motor driver, and the D+ interlock can all
-be exercised safely on the bench (see the "Motor Test" commissioning
-button) before anything is connected in the vehicle.
-
-## Power supply
-
-The ESP32_Relay_30A_X2_V1.1's 3-pin "7-28V GND 5V" terminal block takes
-the input voltage (here: 12V) and, via an onboard buck regulator, outputs
-regulated 5V from the same terminal block. That 5V rail powers the ESP32
-module and both relay coils (~70-90mA each) - nothing else needs to draw
-from it.
-
-> **Honesty check on the regulator identification:** I read the silkscreen
-> off a slightly blurry photo ("...2596S" next to a 33µH inductor) and
-> inferred the common LM2596/MP2596-style 3A buck-converter family from
-> that - a websearch for the exact marking ("JM93MRP") turned up nothing,
-> and I could not fetch a datasheet to confirm it. That's an educated guess
-> from the visual topology (TO-263 regulator + inductor + electrolytic caps
-> = standard non-isolated buck converter), **not** a verified fact. Please
-> measure the 5V terminal with a multimeter under load (both relays
-> energized) before relying on it, rather than trusting this
-> identification.
-
-The MD30C is **entirely separate** from that 5V rail - per its own user's
-manual (Cytron, Rev 1.4), it has no dedicated logic-supply pin at all. Its
-`POWER` terminal (5-30V, the same leisure-battery feed that also drives the
-motor stage) is regulated down to logic voltage **internally on the MD30C
-board itself**. The only thing connecting it to the ESP32 side is the 3-pin
-signal header (`GND`/`PWM`/`DIR`) - and even `DIR` on that header isn't
-used (see wiring below). So there's no headroom question to work out here
-at all, unlike the earlier IBT-2 revision.
-
-## Measured current draw
-
-Confirmed on the actual installed blower (real ductwork, not a free-air
-bench test) via a Victron SmartShunt on the leisure battery. Baseline
-camper load while idle was ~3.5A - subtract that from each reading below
-to get the blower's own draw:
-
-| PWM level | Total (incl. ~3.5A baseline) | Blower only |
+| Entity | Type | Purpose |
 |---|---|---|
-| 0%   | 3.5A  | 0A |
-| 10%  | 4A    | ~0.5A |
-| 20%  | 4.2A  | ~0.7A |
-| 30%  | 5A    | ~1.5A |
-| 40%  | 6.2A  | ~2.7A |
-| 50%  | 8A    | ~4.5A |
-| 60%  | 11A   | ~7.5A |
-| 70%  | 13.5A | ~10A |
-| 80%  | 16.8A | ~13.3A |
-| 90%  | 21A   | ~17.5A |
-| 100% | 25.5A | ~22A |
+| **HVAC Fan (Battery)** | `number`, 0-100 %, step 10 | The only control. 0 % = OEM, 10-100 % = battery at that duty cycle |
+| Terminal 15R Active | `binary_sensor` | Ignition state as seen by the controller |
+| Battery Mode Override (Skip After-Run Wait) | `switch` | Arms battery mode without waiting out `ignition_off_delay` |
+| LED, Restart | `light`, `button` | Board status LED, device restart |
 
-At 100% the blower itself draws roughly 22A - right in the range the OEM
-fuse rating (20-30A) had suggested from the start, and comfortably under
-the MD30C's 30A continuous rating with real headroom to spare (~8A). No
-need to revisit the driver sizing based on this.
+- **0 % (default):** relays de-energized, OEM controller connected, MD30C
+  PWM held at 0 %.
+- **10-100 %:** relays switch the motor leads to the MD30C, which is then
+  driven at the selected duty cycle. Rejected (and reset to 0 %) while
+  battery mode is not armed.
+
+### Switch-over sequence
+
+Engage (`script.motor_engage`):
+1. PWM → 0 %
+2. Relays → battery (NO)
+3. PWM → selected level
+
+Disengage (`script.motor_disengage`, used by every path back to OEM -
+ignition on, slider to 0 %):
+1. PWM → 0 %
+2. Wait `motor_coast_down_delay` (default 2 s) - the coasting motor still
+   generates back-EMF; switching now would arc the contacts
+3. Relays → OEM (NC)
+
+### Ignition interlock (Terminal 15R)
+
+- **Ignition on → immediately back to OEM.** Stops the after-run timer,
+  disarms battery mode, clears the override, sets the slider to 0 % and
+  disengages. Cannot be bypassed.
+- **Ignition off → after-run timer.** Battery mode is re-armed only after
+  `ignition_off_delay` (default 20 s), giving the OEM controller time to
+  finish its own after-run.
+- **Override** skips only the *waiting*, never the *cut-over*: the next
+  ignition-on turns it off again, so re-arming after every stop is a fresh
+  decision.
+
+Terminal 15R drops essentially immediately at ignition-off. An earlier
+revision used Terminal 30t, which stays live 15-30+ min after parking -
+that is why the override exists; with 15R it is optional.
+
+Both delays are `substitutions:` at the top of `relay-2ch-hvac.yaml`.
 
 ## Hardware
 
-- **ESP32_Relay_30A_X2_V1.1** (photos in `information/`): ESP32-32E module,
-  2x Songle SLA-05VDC-SL-C changeover relays (30A/240VAC resp. 30A/28VDC),
-  7-28V input with a buck regulator down to 5V.
-- **Cytron MD30C** motor driver (5-30V, 30A continuous/80A peak for up to
-  1s, PWM+DIR logic interface, logic input HIGH = 3-5.5V / LOW = 0-0.5V
-  per its datasheet - ESP32's 3.3V GPIO clears the 3V HIGH threshold with
-  a bit of margin, not a lot), powered directly from the leisure battery.
-  Sized against the blower's expected draw (OEM fuse in that circuit is
-  typically 20-30A) with real headroom, unlike the 20A MD20A or the
-  20A-continuous-despite-"30A"-branding generic MOSFET modules also
-  considered.
+| Part | Notes |
+|---|---|
+| ESP32_Relay_30A_X2_V1.1 | ESP32-WROOM-32E, 2× Songle SLA-05VDC-SL-C SPDT (30 A), 7-28 V input with onboard 5 V buck. Photos in `information/` |
+| Cytron MD30C | 5-30 V, 30 A continuous / 80 A peak (1 s), PWM+DIR interface, max. 20 kHz ext. PWM |
+| 2-ch EL817 opto module | Terminal 15R level shifting / isolation, R1 470 Ω and R2 10 kΩ onboard |
+| Fuse | 30 A, leisure battery → MD30C `POWER` |
+| Supply cable | 6 mm², ~5 m, existing run reused |
 
-### ESP32_Relay_30A_X2_V1.1 pinout
+The MD30C logic input threshold is HIGH ≥ 3 V; the ESP32's 3.3 V clears
+it, with little margin.
 
-All GPIOs below are broken out on JP1/JP2 per the bottom silkscreen
-(`information/*_Bottom.jpg`) and aren't used by any other onboard consumer.
+![Controller assembly](information/assembly_input_header.jpg)
+*Assembly: MD30C on brass standoffs above the ESP32 relay board, opto
+module underneath, WAGO 221 distribution on printed brackets.*
 
-| Signal              | GPIO | Function |
-|----------------------|------|----------|
-| Onboard LED            | G5   | relay board status LED |
-| Relay 1                 | G12  | switches one blower motor lead |
-| Relay 2                 | G13  | switches the other blower motor lead |
-| MD30C `PWM`             | G4   | motor speed signal (20 kHz) |
-| Opto module `VO`         | G27  | stand-in 3.3V source, held ALWAYS_ON (see "Powering the opto module's VO" above), JP1 outer row |
-| Terminal 15R sense        | G25  | detects vehicle running (see optocoupler above), JP1 outer row |
+### ESP32 board pinout
 
-GPIO16/17/18/34 (used by the earlier IBT-2 revision and an earlier
-revision of the opto module wiring) are all free/unused now - the MD30C
-only needs one PWM signal from the ESP32, and the opto module's two
-signals moved to GPIO27/GPIO25 on JP1's outer row.
+| Signal | GPIO | Header | Function |
+|---|---|---|---|
+| Status LED | 5 | onboard | board LED |
+| Relay 1 | 12 | onboard | motor lead A |
+| Relay 2 | 13 | onboard | motor lead B |
+| MD30C `PWM` | 4 | JP2 inner row | speed signal, 20 kHz |
+| Opto `VO` | 27 | JP1 outer row | 3.3 V supply for opto output side (GPIO held high) |
+| Terminal 15R sense | 25 | JP1 outer row | opto `OUT1`, active-low |
+
+Header rows per the bottom silkscreen (`information/*_Bottom.jpg`); the
+photo is mirrored relative to the component side, so "outer" means the
+board-edge side as seen from the top. When rebuilding, verify each pin
+with a multimeter (toggle from HA, probe) before soldering.
+
+### Relay wiring (each relay)
+
+| Contact | Connection |
+|---|---|
+| COM | blower motor lead |
+| NC | OEM controller |
+| NO | MD30C `MOTOR A` / `MOTOR B` |
+
+Both relays are only ever switched together (`fan_source_battery`), so the
+OEM controller and the MD30C can never share a motor lead.
+
+![Blower connection](information/blower_connection.jpg)
+*Blower side: the connection between the motor and the OEM blower
+regulator (A 000 906 93 07, mounted on the blower housing) is
+intercepted and routed to the changeover relays.*
+
+![Relay terminals](information/assembly_relay_terminals.jpg)
+*Relay COM/NC/NO terminals with ring lugs, fed to the WAGO row.*
 
 ### MD30C wiring
 
-Per the Cytron MD30C user's manual (Rev 1.4):
+Per Cytron MD30C user's manual, Rev 1.4:
 
-- **Jumpers:** `JP4` = Don't Care (X), `JP6` = `EXT PWM` - this switches
-  the board from its standalone onboard-potentiometer mode into
-  microcontroller-controlled mode. Do this *after* the standalone bench
-  check below, not before.
-- **3-pin `INPUT` header** (`GND` / `PWM` / `DIR`, in that order):
-  - `PWM` → GPIO4 on the ESP32 board.
-  - `GND` → common ground with the ESP32 board (this is the logic
-    reference ground for the signal header, separate from the heavy
-    `POWER`/`MOTOR` terminal wiring below - tie both boards' grounds
-    together somewhere, e.g. at the battery negative).
-  - `DIR` → hardwired directly to `GND` (either right there on the
-    header, or with a jumper wire) - **not** to a GPIO. Per the MD30C's
-    truth table, `PWM=High, DIR=Low` drives Output A; the blower only
-    ever needs one direction, so there's nothing to switch at runtime.
-    If it spins the wrong way once wired up, swap the two motor leads at
-    `MOTOR A`/`B` instead of touching `DIR` or the config - electrically
-    identical, no reflash needed. Bonus: the manual explicitly warns to
-    have `DIR` or `PWM` at LOW when power comes on - hardwiring `DIR` to
-    GND satisfies that automatically, even before the ESP32 has booted.
-- **`POWER` terminal** (`+`/`-`) → leisure battery, fused. This is the
-  *only* power input the MD30C needs - it also derives its own logic
-  supply from here internally, nothing extra required from the ESP32
-  board's 5V rail.
-- **`MOTOR` terminal** (`A`/`B`) → to the changeover (NO) contacts of
-  Relay 1/2. ⚠️ The manual is explicit: **connecting the battery to the
-  `MOTOR` terminal instead of `POWER` burns the MOSFETs, and that's not
-  covered under warranty** - double-check before powering up.
-- For current draw >20A (our expected range), the manual recommends
-  soldering the wires directly to the pads on the PCB's bottom layer
-  rather than relying only on the screw terminals.
+- **Jumpers:** `JP4` = don't care, `JP6` = `EXT PWM` (after the standalone
+  test, see Commissioning).
+- **`INPUT` header** (`GND` / `PWM` / `DIR`):
+  - `PWM` → GPIO4
+  - `GND` → ESP32 ground
+  - `DIR` → hardwired to `GND`. The blower runs in one direction only;
+    this also satisfies the manual's requirement that `DIR` or `PWM` be
+    LOW at power-up, before the ESP32 has booted. Wrong direction → swap
+    the motor leads, not the config.
+- **`POWER`** (`+`/`-`) → leisure battery, fused. Also supplies the
+  MD30C's internal logic - nothing needed from the ESP32 board.
+- **`MOTOR`** (`A`/`B`) → relay NO contacts.
+  ⚠️ Battery on `MOTOR` instead of `POWER` destroys the MOSFETs.
+- Above 20 A the manual recommends soldering the wires to the bottom-side
+  pads rather than relying on the screw terminals alone.
 
-**Bench-test the MD30C completely standalone before wiring it to the ESP32
-at all:** temporarily set `JP4`=`INT POT`, `JP6`=`INT PWM`, connect
-battery+motor, and use the onboard Test Button A/B (with the onboard
-speed potentiometer) to confirm the board and motor actually work - no
-microcontroller needed for this check. Only then switch the jumpers to
-`JP4`=Don't Care, `JP6`=`EXT PWM` and wire up the ESP32 signal header.
-This is exactly the standalone check the IBT-2 didn't give us, and would
-have caught its failure immediately instead of after a long wiring-level
-debugging session.
+| | |
+|---|---|
+| ![MD30C POWER terminal](information/assembly_power_terminal.jpg) | ![MD30C MOTOR terminal](information/assembly_motor_terminal.jpg) |
+| *`POWER` terminal (rear) and `INPUT` header* | *`MOTOR` terminal and relay contacts* |
 
-### Relay wiring (per relay)
+### Terminal 15R input
 
-- **COM** → motor lead to the blower
-- **NC** (de-energized) → OEM Sprinter controller
-- **NO** (energized) → MD30C `MOTOR A`/`B`
+Terminal 15R is at vehicle voltage (12-14.4 V plus transients) and never
+goes directly to a GPIO. Opto module channel 1:
 
-Both relays **always** switch both motor leads together (see
-`fan_source_battery` in `relay-2ch-hvac.yaml`), so the OEM controller and
-the MD30C can never both be connected to either lead at the same time.
+| Module pin | Connection |
+|---|---|
+| `IVCC` | Terminal 15R (no external resistor: onboard R1 470 Ω → ~25 mA at 13 V, ~29 mA at 15 V; module max. 50 mA) |
+| `SIN1` | vehicle ground |
+| `VO` | GPIO27 |
+| `OUT1` | GPIO25 (pull-up is the onboard R2 10 kΩ) |
+| `OGND` | ESP32 ground |
 
-## ESPHome configuration
+The output is active-low; `inverted: true` in the config makes
+`Terminal 15R Active` read "on" while the ignition is on.
 
-- `relay-2ch-hvac.yaml` - board-specific config (relays, motor driver, fan
-  control entity)
-- `.basics.yaml` - shared base config (WiFi, API, OTA, web server,
-  watchdog); pulled in via `packages:`
-- `secrets.yaml.example` - template for `secrets.yaml` (WiFi credentials,
-  API key, passwords). Copy to `secrets.yaml` and fill in real values -
-  that file is never committed (`.gitignore`).
+**VO from a GPIO:** neither board breaks out a spare 3.3 V pin, so `VO` is
+fed from GPIO27, held high (`restore_mode: ALWAYS_ON`). Load is
+3.3 V / 10 kΩ ≈ 0.33 mA - trivial for a GPIO, but it has no short-circuit
+protection, so don't reuse it for anything with real current. During
+boot, before GPIO27 is driven, the input may read wrong for a moment;
+this cannot engage battery mode, because relays start `ALWAYS_OFF` and
+`battery_mode_allowed` starts `false`.
+
+![Opto module](information/assembly_side_opto.jpg)
+*Side view: EL817 opto module for Terminal 15R below the stack.*
+
+### Power supply
+
+The relay board's 3-pin terminal (`7-28V` / `GND` / `5V`) takes 12 V and
+provides 5 V from its onboard buck converter for the ESP32 and both relay
+coils (~70-90 mA each). Nothing else draws from this rail.
+
+The MD30C is independent of this rail (see above). Only `GND` and `PWM`
+connect the two boards.
+
+## Measured current draw
+
+Measured on the installed blower (real ductwork) with a Victron
+SmartShunt on the leisure battery. Baseline camper load ~3.5 A subtracted.
+
+| PWM | Blower current |
+|---|---|
+| 10 % | ~0.5 A |
+| 20 % | ~0.7 A |
+| 30 % | ~1.5 A |
+| 40 % | ~2.7 A |
+| 50 % | ~4.5 A |
+| 60 % | ~7.5 A |
+| 70 % | ~10 A |
+| 80 % | ~13.3 A |
+| 90 % | ~17.5 A |
+| 100 % | ~22 A |
+
+~22 A at 100 % leaves ~8 A headroom to the MD30C's 30 A continuous
+rating.
+
+## Commissioning
+
+1. **MD30C standalone:** `JP4` = `INT POT`, `JP6` = `INT PWM`, battery and
+   motor connected, spin with Test Button A/B and the onboard pot. No
+   microcontroller involved.
+2. **GPIO positions:** toggle each output from HA and probe the header
+   pin before soldering.
+3. **Jumpers to external:** `JP4` = don't care, `JP6` = `EXT PWM`, wire
+   the `INPUT` header.
+4. **Interlock:** ignition on/off, check `Terminal 15R Active` and that
+   the slider is rejected during the after-run.
+5. **First run:** slider to 20-30 %, check airflow and direction, back to
+   0 %. Wrong direction → swap motor leads at `MOTOR A`/`B`.
+6. **Bench first:** all of the above was done on a spare used blower and
+   OEM controller before touching the vehicle.
+
+## Files
+
+| File | Content |
+|---|---|
+| `relay-2ch-hvac.yaml` | Device config: relays, PWM, interlock, scripts, entities |
+| `.basics.yaml` | Shared base (WiFi + fallback AP, API, OTA, web server, WiFi watchdog), included via `packages:` |
+| `secrets.yaml.example` | Template - copy to `secrets.yaml` (git-ignored) |
+| `information/` | Board and installation photos |
+
+```bash
+cp secrets.yaml.example secrets.yaml   # fill in
+esphome run relay-2ch-hvac.yaml
+```
+
+## Design notes
+
+**`number` instead of `fan:`** - ESPHome's template fan publishes state
+optimistically before `on_turn_on`/`on_speed_set` run, with known ordering
+issues between turn-on and speed (esphome/esphome#10844). For a
+safety-relevant switch-over the sequence must be owned explicitly;
+`number` with `set_action` does that. Step 10 keeps phone input on round
+values.
+
+**MD30C instead of IBT-2** - the first build used an IBT-2 (BTS7960)
+H-bridge. That unit was dead on arrival (correct logic levels at every
+input, almost no output even unloaded), a common failure of these clone
+boards. The blower never reverses, so an H-bridge was unnecessary anyway;
+the MD30C is simpler, properly documented and sized for the load. GPIO16,
+17, 18 and 34 used by the IBT-2 revision are now free.
+
+## Disclaimer
+
+Modifying vehicle electrics is at your own risk. This is a personal
+project documented as built, not a product.
