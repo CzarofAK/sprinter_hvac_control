@@ -98,7 +98,9 @@ Both delays are `substitutions:` at the top of `relay-2ch-hvac.yaml`.
 The MD30C logic input threshold is HIGH ≥ 3 V; the ESP32's 3.3 V clears
 it, with little margin.
 
-<!-- PHOTO: controller assembly (ESP32 board + MD30C + opto module) -->
+![Controller assembly](information/assembly_input_header.jpg)
+*Assembly: MD30C on brass standoffs above the ESP32 relay board, opto
+module underneath, WAGO 221 distribution on printed brackets.*
 
 ### ESP32 board pinout
 
@@ -132,6 +134,9 @@ OEM controller and the MD30C can never share a motor lead.
 regulator (A 000 906 93 07, mounted on the blower housing) is
 intercepted and routed to the changeover relays.*
 
+![Relay terminals](information/assembly_relay_terminals.jpg)
+*Relay COM/NC/NO terminals with ring lugs, fed to the WAGO row.*
+
 ### MD30C wiring
 
 Per Cytron MD30C user's manual, Rev 1.4:
@@ -152,7 +157,10 @@ Per Cytron MD30C user's manual, Rev 1.4:
 - Above 20 A the manual recommends soldering the wires to the bottom-side
   pads rather than relying on the screw terminals alone.
 
-<!-- PHOTO: MD30C wiring detail -->
+| | |
+|---|---|
+| ![MD30C POWER terminal](information/assembly_power_terminal.jpg) | ![MD30C MOTOR terminal](information/assembly_motor_terminal.jpg) |
+| *`POWER` terminal (rear) and `INPUT` header* | *`MOTOR` terminal and relay contacts* |
 
 ### Terminal 15R input
 
@@ -178,7 +186,8 @@ boot, before GPIO27 is driven, the input may read wrong for a moment;
 this cannot engage battery mode, because relays start `ALWAYS_OFF` and
 `battery_mode_allowed` starts `false`.
 
-<!-- PHOTO: Terminal 15R tap / opto module -->
+![Opto module](information/assembly_side_opto.jpg)
+*Side view: EL817 opto module for Terminal 15R below the stack.*
 
 ### Power supply
 
