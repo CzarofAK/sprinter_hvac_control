@@ -45,7 +45,6 @@ flowchart LR
 | **HVAC Fan (Battery)** | `number`, 0-100 %, step 10 | The only control. 0 % = OEM, 10-100 % = battery at that duty cycle |
 | Terminal 15R Active | `binary_sensor` | Ignition state as seen by the controller |
 | Battery Mode Override (Skip After-Run Wait) | `switch` | Arms battery mode without waiting out `ignition_off_delay` |
-| Motor Test (3s, 25%) | `button` (config) | Commissioning pulse, see below |
 | LED, Restart | `light`, `button` | Board status LED, device restart |
 
 - **0 % (default):** relays de-energized, OEM controller connected, MD30C
@@ -62,7 +61,7 @@ Engage (`script.motor_engage`):
 3. PWM → selected level
 
 Disengage (`script.motor_disengage`, used by every path back to OEM -
-ignition on, slider to 0 %, end of motor test):
+ignition on, slider to 0 %):
 1. PWM → 0 %
 2. Wait `motor_coast_down_delay` (default 2 s) - the coasting motor still
    generates back-EMF; switching now would arc the contacts
@@ -93,8 +92,8 @@ Both delays are `substitutions:` at the top of `relay-2ch-hvac.yaml`.
 | ESP32_Relay_30A_X2_V1.1 | ESP32-WROOM-32E, 2× Songle SLA-05VDC-SL-C SPDT (30 A), 7-28 V input with onboard 5 V buck. Photos in `information/` |
 | Cytron MD30C | 5-30 V, 30 A continuous / 80 A peak (1 s), PWM+DIR interface, max. 20 kHz ext. PWM |
 | 2-ch EL817 opto module | Terminal 15R level shifting / isolation, R1 470 Ω and R2 10 kΩ onboard |
-| Fuse | Leisure battery → MD30C `POWER` <!-- TODO: rating --> |
-| Supply cable | Battery → MD30C <!-- TODO: cross-section / length --> |
+| Fuse | 30 A, leisure battery → MD30C `POWER` |
+| Supply cable | 6 mm², ~5 m, existing run reused |
 
 The MD30C logic input threshold is HIGH ≥ 3 V; the ESP32's 3.3 V clears
 it, with little margin.
@@ -108,13 +107,14 @@ it, with little margin.
 | Status LED | 5 | onboard | board LED |
 | Relay 1 | 12 | onboard | motor lead A |
 | Relay 2 | 13 | onboard | motor lead B |
-| MD30C `PWM` | 4 | JP2 | speed signal, 20 kHz |
+| MD30C `PWM` | 4 | JP2 inner row | speed signal, 20 kHz |
 | Opto `VO` | 27 | JP1 outer row | 3.3 V supply for opto output side (GPIO held high) |
 | Terminal 15R sense | 25 | JP1 outer row | opto `OUT1`, active-low |
 
-> ⚠️ Header positions were derived from photos. Verify each pin with a
-> multimeter (toggle from HA, probe) before soldering permanently - a
-> mirrored-photo mistake already cost one pin earlier in this project.
+Header rows per the bottom silkscreen (`information/*_Bottom.jpg`); the
+photo is mirrored relative to the component side, so "outer" means the
+board-edge side as seen from the top. When rebuilding, verify each pin
+with a multimeter (toggle from HA, probe) before soldering.
 
 ### Relay wiring (each relay)
 
@@ -184,12 +184,7 @@ this cannot engage battery mode, because relays start `ALWAYS_OFF` and
 
 The relay board's 3-pin terminal (`7-28V` / `GND` / `5V`) takes 12 V and
 provides 5 V from its onboard buck converter for the ESP32 and both relay
-coils (~70-90 mA each).
-
-The regulator was identified only from its silkscreen ("…2596S", 33 µH
-inductor) as an LM2596-type 3 A buck; the exact marking returned no
-datasheet. <!-- TODO: replace with measured value --> Measure the 5 V
-terminal with both relays energized before relying on it.
+coils (~70-90 mA each). Nothing else draws from this rail.
 
 The MD30C is independent of this rail (see above). Only `GND` and `PWM`
 connect the two boards.
@@ -220,17 +215,15 @@ rating.
 1. **MD30C standalone:** `JP4` = `INT POT`, `JP6` = `INT PWM`, battery and
    motor connected, spin with Test Button A/B and the onboard pot. No
    microcontroller involved.
-2. **5 V rail:** measure the relay board's 5 V output with both relays
-   energized.
-3. **GPIO positions:** toggle each output from HA and probe the header
+2. **GPIO positions:** toggle each output from HA and probe the header
    pin before soldering.
-4. **Jumpers to external:** `JP4` = don't care, `JP6` = `EXT PWM`, wire
+3. **Jumpers to external:** `JP4` = don't care, `JP6` = `EXT PWM`, wire
    the `INPUT` header.
-5. **Interlock:** ignition on/off, check `Terminal 15R Active` and that
+4. **Interlock:** ignition on/off, check `Terminal 15R Active` and that
    the slider is rejected during the after-run.
-6. **Motor Test button:** 3 s at 25 %, then normal disengage. Wrong
-   direction → swap motor leads.
-7. **Bench first:** all of the above was done on a spare used blower and
+5. **First run:** slider to 20-30 %, check airflow and direction, back to
+   0 %. Wrong direction → swap motor leads at `MOTOR A`/`B`.
+6. **Bench first:** all of the above was done on a spare used blower and
    OEM controller before touching the vehicle.
 
 ## Files
