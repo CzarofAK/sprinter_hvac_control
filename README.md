@@ -5,6 +5,12 @@ leisure battery while the vehicle is parked - for standby ventilation
 without waking the vehicle electrics. Built on ESPHome, with native Home
 Assistant integration and a local web UI.
 
+> [!WARNING]
+> **Safety & liability / Sicherheit & Haftung** – Private hobby project, provided "as is" and used **at your own risk**.
+> This build switches the **blower motor current from the leisure battery** and is wired into the **vehicle's OEM HVAC circuit**. Wrong wiring, missing fuses or undersized cables can cause fire, a flat battery or damage to the vehicle electrics.
+> Installation behind the glovebox affects the vehicle's original wiring and may affect warranty and type approval. Have the installation checked by a qualified person.
+> See [DISCLAIMER.md](DISCLAIMER.md) (EN/DE).
+
 The OEM climate control stays fully intact: whenever the ignition is on,
 or the controller is unpowered, crashed or booting, the blower is wired to
 the factory controller exactly as delivered.
@@ -271,3 +277,7 @@ the MD30C is simpler, properly documented and sized for the load. GPIO16,
 
 Modifying vehicle electrics is at your own risk. This is a personal
 project documented as built, not a product.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Use at your own risk – see [DISCLAIMER.md](DISCLAIMER.md).
